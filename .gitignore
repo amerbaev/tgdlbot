@@ -12,15 +12,9 @@ env/
 *.swo
 
 # Tests
-tests/
 .pytest_cache/
 .coverage
 htmlcov/
-
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
 
 # OS
 .DS_Store
@@ -32,4 +26,3 @@ Thumbs.db
 # FFmpeg (используется системный в Docker)
 ffmpeg.exe
 ffmpeg
-

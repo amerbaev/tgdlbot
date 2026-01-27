@@ -1,0 +1,29 @@
+services:
+  # Production сервис
+  tgdlbot:
+    build:
+      context: .
+      target: production  # Используем production stage
+    container_name: tgdlbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/app/downloads
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Test сервис (для запуска тестов)
+  test:
+    build:
+      context: .
+      target: test  # Используем test stage
+    container_name: tgdlbot-test
+    env_file:
+      - .env
+    profiles:
+      - test  # Только при явном вызове
+    command: ["uv", "run", "pytest", "tests/", "-v"]
