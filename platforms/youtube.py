@@ -57,17 +57,13 @@ def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
     return None
 
 
-def should_skip_format(info: dict, target_height: int) -> bool:
-    """Проверить, следует ли пропустить формат из-за лимита размера."""
-    estimated = estimate_format_size(info, target_height)
-    MB = 1024 * 1024
-    if estimated and estimated > MAX_FILE_SIZE * SIZE_THRESHOLD:
-        return True
-    return False
-
-
 def select_best_format(info: dict) -> List[Tuple[str, Optional[dict]]]:
     """Выбор лучшего формата от высокого к низкому качеству.
+
+    Логика:
+    - Если размер 1080p/720p неизвестн ИЛИ слишком большой → пропускаем
+    - Всегда пробуем 480p как безопасный вариант
+    - Fallback на 360p если нет 480p
 
     Args:
         info: Метаданные видео от yt-dlp
@@ -77,21 +73,32 @@ def select_best_format(info: dict) -> List[Tuple[str, Optional[dict]]]:
     """
     formats_to_try = []
 
-    for target_height, extractor_args in FORMAT_CANDIDATES:
-        # Пропускаем форматы превышающие лимит
-        if target_height in (1080, 720) and should_skip_format(info, target_height):
+    # Проверяем 1080p и 720p
+    for target_height, extractor_args in FORMAT_CANDIDATES[:2]:  # 1080, 720
+        estimated = estimate_format_size(info, target_height)
+
+        # Пропускаем если:
+        # 1. Размер неизвестн (не можем оценить)
+        # 2. Размер слишком большой
+        if estimated is None or estimated > MAX_FILE_SIZE * SIZE_THRESHOLD:
             continue
 
-        # Формируем селектор формата
-        if target_height >= 480:
-            format_selector = (
-                f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
-                f'bestvideo[height<={target_height}]+bestaudio'
-            )
-        else:
-            format_selector = '18'
-
+        # Размер известен и приемлем - добавляем
+        format_selector = (
+            f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
+            f'bestvideo[height<={target_height}]+bestaudio'
+        )
         formats_to_try.append((format_selector, extractor_args))
+
+    # Всегда добавляем 480p (без extractor_args для совместимости)
+    format_selector_480 = (
+        'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/'
+        'bestvideo[height<=480]+bestaudio'
+    )
+    formats_to_try.append((format_selector_480, None))
+
+    # Fallback на 360p (формат 18)
+    formats_to_try.append(('18', None))
 
     return formats_to_try
 

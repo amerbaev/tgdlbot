@@ -5,7 +5,6 @@ from platforms.youtube import (
     YouTubePlatform,
     select_best_format,
     estimate_format_size,
-    should_skip_format,
 )
 
 
@@ -99,11 +98,16 @@ class TestSelectBestFormat:
         assert all(isinstance(item, tuple) and len(item) == 2 for item in result)
 
     def test_uses_mediaconnect(self):
-        """Test that mediaconnect client is used."""
-        info = {'formats': []}
+        """Test that mediaconnect client is used when size is known."""
+        info = {
+            'formats': [
+                {'format_id': '137', 'height': 1080, 'filesize': 20 * 1024 * 1024, 'vcodec': 'avc1'},
+            ]
+        }
 
         result = select_best_format(info)
 
+        # First format should use mediaconnect
         format_selector, extractor_args = result[0]
         assert 'mediaconnect' in extractor_args.get('youtube', {}).get('player_client', '')
 
@@ -120,7 +124,22 @@ class TestSelectBestFormat:
 
         # Should start with 720p, not 1080p
         first_selector = result[0][0]
-        assert 'height<=720' in first_selector or 'height<=1080' not in first_selector
+        assert 'height<=720' in first_selector
+
+    def test_skips_when_size_unknown(self):
+        """Test that 1080p/720p are skipped when size is unknown."""
+        info = {
+            'formats': [
+                {'format_id': '137', 'height': 1080, 'vcodec': 'avc1'},  # No filesize
+                {'format_id': '136', 'height': 720, 'vcodec': 'avc1'},  # No filesize
+            ]
+        }
+
+        result = select_best_format(info)
+
+        # Should skip to 480p when size is unknown
+        first_selector = result[0][0]
+        assert 'height<=480' in first_selector
 
     def test_includes_all_if_small(self):
         """Test that all formats are included if small enough."""
@@ -133,7 +152,30 @@ class TestSelectBestFormat:
 
         result = select_best_format(info)
 
-        # Should include 1080p
-        assert len(result) >= 3
+        # Should include 1080p, 720p, 480p, 360p
+        assert len(result) == 4
         first_selector = result[0][0]
         assert 'height<=1080' in first_selector
+
+    def test_always_includes_480p_fallback(self):
+        """Test that 480p is always included as safe option."""
+        info = {'formats': []}
+
+        result = select_best_format(info)
+
+        # Should always have 480p
+        assert len(result) >= 2  # At least 480p and 360p
+        # First should be 480p (no high-res formats available)
+        first_selector = result[0][0]
+        assert 'height<=480' in first_selector or result[1][0] == '18'
+
+    def test_has_360p_fallback(self):
+        """Test that 360p (format 18) is always last option."""
+        info = {'formats': []}
+
+        result = select_best_format(info)
+
+        # Last option should be format 18 (360p)
+        last_selector, last_args = result[-1]
+        assert last_selector == '18'
+        assert last_args is None
