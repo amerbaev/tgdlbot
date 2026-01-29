@@ -1,13 +1,12 @@
-"""Telegram YouTube Downloader Bot.
+"""Telegram Video Downloader Bot.
 
-Downloads YouTube videos in best quality (1080p → 720p → 480p → 360p)
+Downloads videos from YouTube and Instagram in best quality
 and sends them to Telegram, splitting large files into 50MB parts.
 """
 
 import asyncio
 import logging
 import os
-import re
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -18,25 +17,19 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import yt_dlp
 
 from config import BOT_TOKEN, DOWNLOAD_DIR, MAX_FILE_SIZE
+from platforms import YouTubePlatform, InstagramPlatform
 
 
 # Constants
 MB = 1024 * 1024
 TARGET_SIZE_MB = 45  # 90% of 50MB limit for safety
 MAX_RETRIES = 2
-SIZE_THRESHOLD = 1.5  # Multiplier for format size estimation
 RETRY_DURATION_MULTIPLIER = 0.8  # Reduce duration by 20% on retry
 
-# YouTube URL pattern
-YOUTUBE_PATTERN = r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$'
-
-# Format priorities (height, extractor_args)
-FORMAT_CANDIDATES = [
-    (1080, {'youtube': {'player_client': 'mediaconnect'}}),
-    (720, {'youtube': {'player_client': 'mediaconnect'}}),
-    (480, {}),
-    (360, {}),
-]
+# Platform handlers
+youtube_platform = YouTubePlatform()
+instagram_platform = InstagramPlatform()
+PLATFORMS = [youtube_platform, instagram_platform]
 
 
 # Logging setup
@@ -71,126 +64,96 @@ def format_size(bytes_size: int) -> str:
     return f'{bytes_size / MB:.1f}MB'
 
 
+def is_safe_path(path: str, base_dir: str = DOWNLOAD_DIR) -> bool:
+    """Проверка, что путь находится внутри базовой директории.
+
+    Args:
+        path: Путь для проверки
+        base_dir: Базовая директория
+
+    Returns:
+        True если путь безопасен
+    """
+    try:
+        # Получаем абсолютный путь
+        abs_path = os.path.abspath(path)
+        abs_base = os.path.abspath(base_dir)
+
+        # Проверяем, что путь начинается с базовой директории
+        return abs_path.startswith(abs_base + os.sep) or abs_path == abs_base
+    except (ValueError, TypeError):
+        return False
+
+
 def is_youtube_url(url: str) -> bool:
     """Проверка, является ли URL ссылкой на YouTube."""
-    return bool(re.match(YOUTUBE_PATTERN, url))
+    return youtube_platform.is_valid_url(url)
 
 
-def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
-    """Оценка размера формата по заданному качеству.
+def is_instagram_url(url: str) -> bool:
+    """Проверка, является ли URL ссылкой на Instagram."""
+    return instagram_platform.is_valid_url(url)
+
+
+def detect_platform(url: str) -> Optional[str]:
+    """Определяет платформу по URL.
 
     Args:
-        info: Метаданные видео от yt-dlp
-        target_height: Желаемая высота видео
+        url: URL для проверки
 
     Returns:
-        Оценочный размер в байтах или None если неизвестен
+        Название платформы ('youtube', 'instagram') или None
     """
-    formats = info.get('formats', [])
-
-    for fmt in formats:
-        height = fmt.get('height')
-        filesize = fmt.get('filesize')
-        vcodec = fmt.get('vcodec', '')
-
-        # Пропускаем аудио-только потоки
-        if vcodec == 'none':
-            continue
-
-        # Ищем формат с целевым разрешением (в пределах 10px)
-        if height and abs(height - target_height) <= 10:
-            if filesize:
-                return filesize
-
-            # DASH формат: суммируем размеры видео + аудио
-            if fmt.get('acodec') == 'none' and filesize is None:
-                audio_fmt = next(
-                    (
-                        f for f in formats
-                        if f.get('acodec') != 'none' and f.get('vcodec') == 'none'
-                    ),
-                    None,
-                )
-                if audio_fmt and audio_fmt.get('filesize'):
-                    return fmt.get('filesize', 0) + audio_fmt.get('filesize', 0)
-
+    for platform in PLATFORMS:
+        if platform.is_valid_url(url):
+            return platform.name
     return None
-
-
-def should_skip_format(info: dict, target_height: int) -> bool:
-    """Проверить, следует ли пропустить формат из-за лимита размера."""
-    estimated = estimate_format_size(info, target_height)
-    if estimated and estimated > MAX_FILE_SIZE * SIZE_THRESHOLD:
-        logger.info(
-            f'[Thread] {target_height}p пропущен '
-            f'(оценка {format_size(estimated)} > {format_size(MAX_FILE_SIZE)})'
-        )
-        return True
-    return False
-
-
-def select_best_format(info: dict) -> list[tuple[str, dict]]:
-    """Выбор лучшего формата от высокого к низкому качеству.
-
-    Args:
-        info: Метаданные видео от yt-dlp
-
-    Returns:
-        Список кортежей (format_selector, extractor_args)
-    """
-    formats_to_try = []
-
-    for target_height, extractor_args in FORMAT_CANDIDATES:
-        # Пропускаем форматы превышающие лимит
-        if target_height in (1080, 720) and should_skip_format(info, target_height):
-            continue
-
-        # Формируем селектор формата
-        if target_height >= 480:
-            format_selector = (
-                f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
-                f'bestvideo[height<={target_height}]+bestaudio'
-            )
-        else:
-            format_selector = '18'
-
-        formats_to_try.append((format_selector, extractor_args))
-
-    return formats_to_try
 
 
 def download_video_sync(url: str) -> Optional[str]:
     """Синхронное скачивание видео (выполняется в thread pool).
 
     Args:
-        url: Ссылка на YouTube видео
+        url: Ссылка на YouTube или Instagram видео
 
     Returns:
         Путь к скачанному файлу или None при ошибке
     """
     download_id = str(uuid.uuid4())[:8]
 
+    # Определяем платформу и получаем опции форматов
+    platform_handler = None
+    for platform in PLATFORMS:
+        if platform.is_valid_url(url):
+            platform_handler = platform
+            break
+
+    if not platform_handler:
+        logger.error(f'[{download_id}] Неизвестная платформа для URL: {url}')
+        return None
+
     try:
         info_opts = {'quiet': True, 'no_warnings': True}
 
         with yt_dlp.YoutubeDL(info_opts) as ydl:
-            logger.info(f'[Thread] [{download_id}] Анализ: {url}')
+            logger.info(f'[Thread] [{download_id}] Анализ ({platform_handler.name}): {url}')
             info = ydl.extract_info(url, download=False)
-            formats = select_best_format(info)
 
-            if not formats:
+            # Получаем опции форматов от платформы
+            formats_to_try = platform_handler.get_format_options(info)
+            if not formats_to_try:
                 logger.warning(f'[Thread] [{download_id}] Подходящий формат не найден')
                 return None
 
         # Пробуем каждый формат
-        for i, (format_selector, extractor_args) in enumerate(formats, 1):
+        for i, (format_selector, extractor_args) in enumerate(formats_to_try, 1):
             client_name = (
                 extractor_args.get('youtube', {}).get('player_client', 'default')
                 if extractor_args
                 else 'default'
             )
             logger.info(
-                f'[Thread] [{download_id}] Попытка {i}/{len(formats)}: '
+                f'[Thread] [{download_id}] Попытка {i}/{len(formats_to_try)}: '
                 f'{format_selector} (client: {client_name})'
             )
 
@@ -257,6 +220,11 @@ def split_video(video_path: str) -> list[str]:
     Returns:
         Список путей к частям или пустой список при ошибке
     """
+    # Проверка безопасности пути
+    if not is_safe_path(video_path):
+        logger.error(f'[Thread] Небезопасный путь: {video_path}')
+        return []
+
     try:
         # Получаем длительность через ffprobe
         result = subprocess.run(
@@ -290,6 +258,11 @@ def split_video(video_path: str) -> list[str]:
         for i in range(num_parts):
             start_time = i * part_duration
             output_path = video_path.replace('.mp4', f'_part{i+1}.mp4')
+
+            # Проверка безопасности выходного пути
+            if not is_safe_path(output_path):
+                logger.error(f'[Thread] Небезопасный путь: {output_path}')
+                return []
 
             for attempt in range(MAX_RETRIES):
                 try:
@@ -365,6 +338,11 @@ def cleanup_download(user_id: int, video_path: Optional[str] = None) -> None:
         del active_downloads[user_id]
 
     if video_path and os.path.exists(video_path):
+        # Проверка безопасности перед удалением
+        if not is_safe_path(video_path):
+            logger.warning(f'Небезопасный путь при очистке: {video_path}')
+            return
+
         try:
             os.remove(video_path)
         except OSError as e:
@@ -470,9 +448,10 @@ async def process_download(task: DownloadTask) -> None:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start."""
     message = (
-        '👋 *Привет! Я бот для скачивания видео с YouTube*\n\n'
+        '👋 *Привет! Я бот для скачивания видео*\n\n'
         '🎬 *Функции:*\n'
-        '• Скачивание видео до 1080p\n'
+        '• Скачивание с YouTube и Instagram\n'
+        '• Качество до 1080p\n'
         '• Автоматическое разбиение на части\n'
         '• Одновременная обработка нескольких запросов\n\n'
         '📋 *Команды:*\n'
@@ -480,7 +459,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         '/help - Справка\n\n'
         '⚠️ *Ограничения:*\n'
         '• Макс. размер файла: 50MB\n'
-        '• Только ссылки на YouTube'
+        '• Только публичные видео'
     )
 
     await update.message.reply_text(message, parse_mode='Markdown')
@@ -494,27 +473,36 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         '1. Отправьте ссылку на видео\n'
         '2. Я скачаю его в лучшем качестве\n'
         '3. Если >50MB — разобью на части\n\n'
-        '*Поддерживаемые ссылки:*\n'
+        '*Поддерживаемые платформы:*\n\n'
+        '*YouTube:*\n'
         '• youtube.com/watch?v=...\n'
         '• youtu.be/...\n'
         '• youtube.com/shorts/...\n\n'
+        '*Instagram:*\n'
+        '• instagram.com/p/... (посты)\n'
+        '• instagram.com/reel/... (Reels)\n\n'
         '*Качество:*\n'
-        'Автоматически выбирается лучшее (1080p → 720p → 480p → 360p)\n'
-        'Без привязки к аккаунту YouTube!'
+        '• YouTube: автоматический выбор (1080p → 720p → 480p → 360p)\n'
+        '• Instagram: лучшее доступное\n\n'
+        'Без привязки к аккаунту!'
     )
 
     await update.message.reply_text(message, parse_mode='Markdown')
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик текстовых сообщений (ссылки на YouTube)."""
+    """Обработчик текстовых сообщений (ссылки на YouTube/Instagram)."""
     url = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # Проверка YouTube URL
-    if not is_youtube_url(url):
+    # Проверка поддерживаемых URL
+    platform = detect_platform(url)
+    if not platform:
         await update.message.reply_text(
-            '❌ Это не ссылка на YouTube.\n\n'
+            '❌ Неверная ссылка.\n\n'
+            'Поддерживаются:\n'
+            '• YouTube (youtube.com, youtu.be)\n'
+            '• Instagram (instagram.com/p, instagram.com/reel)\n\n'
             'Пожалуйста, отправьте действительную ссылку.'
         )
         return

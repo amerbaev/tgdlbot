@@ -43,6 +43,7 @@ ENV PYTHONUNBUFFERED=1
 
 # Копирование кода приложения
 COPY bot.py config.py ./
+COPY platforms ./platforms/
 
 # Создание директории для загрузок
 RUN mkdir -p downloads
@@ -71,6 +72,7 @@ COPY --from=builder /app/.venv /app/.venv
 # Копирование кода и тестов
 COPY pyproject.toml uv.lock ./
 COPY bot.py config.py ./
+COPY platforms ./platforms/
 COPY tests ./tests/
 
 # Доустановка dev зависимостей

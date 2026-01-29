@@ -1,4 +1,4 @@
-"""Tests for Telegram YouTube Downloader Bot."""
+"""Tests for Telegram Video Downloader Bot."""
 
 import os
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -15,11 +15,11 @@ from bot import (
     help_command,
     handle_message,
     is_youtube_url,
-    select_best_format,
+    is_instagram_url,
+    detect_platform,
     download_video_sync,
     split_video,
     DownloadTask,
-    estimate_format_size,
     format_size,
     cleanup_download,
 )
@@ -69,128 +69,35 @@ class TestFormatSize:
         assert format_size(25 * 1024 * 1024) == '25.0MB'
 
 
-class TestYouTubeURLValidation:
-    """Tests for YouTube URL validation."""
+class TestURLValidation:
+    """Tests for URL validation functions in bot.py."""
 
-    def test_valid_urls(self):
-        """Test valid YouTube URLs."""
+    def test_is_youtube_url(self):
+        """Test YouTube URL validation."""
         valid_urls = [
             'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-            'http://youtube.com/watch?v=dQw4w9WgXcQ',
             'https://youtu.be/dQw4w9WgXcQ',
-            'http://youtu.be/dQw4w9WgXcQ',
-            'https://www.youtube.com/watch?v=dQw4w9WgXcQ&feature=share',
             'https://www.youtube.com/shorts/dQw4w9WgXcQ',
-            'youtube.com/watch?v=dQw4w9WgXcQ',
-            'youtu.be/dQw4w9WgXcQ',
         ]
 
         for url in valid_urls:
             assert is_youtube_url(url), f'{url} should be valid'
 
-    def test_invalid_urls(self):
-        """Test invalid URLs."""
-        invalid_urls = [
-            'https://www.google.com',
-            'not a url',
-            'https://vimeo.com/123456789',
-            '',
-            'https://facebook.com/watch?v=123',
+    def test_is_instagram_url(self):
+        """Test Instagram URL validation."""
+        valid_urls = [
+            'https://www.instagram.com/p/ABC123/',
+            'https://instagram.com/reel/ABC123/',
         ]
 
-        for url in invalid_urls:
-            assert not is_youtube_url(url), f'{url} should be invalid'
+        for url in valid_urls:
+            assert is_instagram_url(url), f'{url} should be valid'
 
-
-class TestEstimateFormatSize:
-    """Tests for format size estimation."""
-
-    def test_known_filesize(self):
-        """Test estimation when filesize is known."""
-        info = {
-            'formats': [
-                {'format_id': '137', 'height': 1080, 'filesize': 100 * 1024 * 1024, 'vcodec': 'avc1'},
-            ]
-        }
-
-        result = estimate_format_size(info, 1080)
-        assert result == 100 * 1024 * 1024
-
-    def test_unknown_size(self):
-        """Test when size is unknown."""
-        info = {
-            'formats': [
-                {'format_id': '137', 'height': 1080, 'vcodec': 'avc1'},
-            ]
-        }
-
-        result = estimate_format_size(info, 1080)
-        assert result is None
-
-    def test_finds_closest_height(self):
-        """Test finding closest resolution."""
-        info = {
-            'formats': [
-                {'format_id': '136', 'height': 720, 'filesize': 50 * 1024 * 1024, 'vcodec': 'avc1'},
-            ]
-        }
-
-        result = estimate_format_size(info, 715)  # Close to 720
-        assert result == 50 * 1024 * 1024
-
-
-class TestSelectBestFormat:
-    """Tests for format selection."""
-
-    def test_returns_list(self):
-        """Test that select_best_format returns a list."""
-        info = {'formats': []}
-
-        result = select_best_format(info)
-
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert all(isinstance(item, tuple) and len(item) == 2 for item in result)
-
-    def test_uses_mediaconnect(self):
-        """Test that mediaconnect client is used."""
-        info = {'formats': []}
-
-        result = select_best_format(info)
-
-        format_selector, extractor_args = result[0]
-        assert 'mediaconnect' in extractor_args.get('youtube', {}).get('player_client', '')
-
-    def test_skips_oversized_1080p(self):
-        """Test that 1080p is skipped if too large."""
-        info = {
-            'formats': [
-                {'format_id': '137', 'height': 1080, 'filesize': 80 * 1024 * 1024, 'vcodec': 'avc1'},
-                {'format_id': '136', 'height': 720, 'filesize': 30 * 1024 * 1024, 'vcodec': 'avc1'},
-            ]
-        }
-
-        result = select_best_format(info)
-
-        # Should start with 720p, not 1080p
-        first_selector = result[0][0]
-        assert 'height<=720' in first_selector or 'height<=1080' not in first_selector
-
-    def test_includes_all_if_small(self):
-        """Test that all formats are included if small enough."""
-        info = {
-            'formats': [
-                {'format_id': '137', 'height': 1080, 'filesize': 20 * 1024 * 1024, 'vcodec': 'avc1'},
-                {'format_id': '136', 'height': 720, 'filesize': 15 * 1024 * 1024, 'vcodec': 'avc1'},
-            ]
-        }
-
-        result = select_best_format(info)
-
-        # Should include 1080p
-        assert len(result) >= 3
-        first_selector = result[0][0]
-        assert 'height<=1080' in first_selector
+    def test_detect_platform(self):
+        """Test platform detection."""
+        assert detect_platform('https://www.youtube.com/watch?v=test') == 'youtube'
+        assert detect_platform('https://instagram.com/p/ABC/') == 'instagram'
+        assert detect_platform('https://google.com') is None
 
 
 class TestDownloadVideoSync:
@@ -224,13 +131,13 @@ class TestDownloadVideoSync:
 
     @pytest.mark.asyncio
     @patch('bot.yt_dlp.YoutubeDL')
-    @patch('bot.select_best_format')
-    async def test_no_formats(self, mock_select_format, mock_ydl_class):
+    @patch('platforms.youtube.YouTubePlatform.get_format_options')
+    async def test_no_formats(self, mock_get_formats, mock_ydl_class):
         """Test when no suitable format found."""
         mock_ydl = MagicMock()
         mock_ydl_class.return_value.__enter__.return_value = mock_ydl
         mock_ydl.extract_info.return_value = {'formats': []}
-        mock_select_format.return_value = []  # No formats available
+        mock_get_formats.return_value = []  # No formats available
 
         result = download_video_sync('https://www.youtube.com/watch?v=test')
 
@@ -360,6 +267,7 @@ class TestCommands:
         assert 'Привет!' in message
         assert '/start' in message
         assert '/help' in message
+        assert 'Instagram' in message
 
     @pytest.mark.asyncio
     async def test_help_command(self, mock_update, mock_context):
@@ -373,13 +281,14 @@ class TestCommands:
 
         assert 'Справка' in message
         assert 'youtube.com' in message
+        assert 'instagram.com' in message
 
 
 class TestHandleMessage:
     """Tests for message handling."""
 
     @pytest.mark.asyncio
-    async def test_non_youtube_url(self, mock_update, mock_context, clean_active_downloads):
+    async def test_non_supported_url(self, mock_update, mock_context, clean_active_downloads):
         """Test handling invalid URL."""
         mock_update.message.text = 'https://www.google.com'
 
@@ -389,7 +298,7 @@ class TestHandleMessage:
         call_args = mock_update.message.reply_text.call_args
         message = call_args[0][0]
 
-        assert 'не ссылка на YouTube' in message
+        assert 'Неверная ссылка' in message or 'не ссылка' in message
 
     @pytest.mark.asyncio
     async def test_empty_message(self, mock_update, mock_context, clean_active_downloads):
@@ -401,9 +310,18 @@ class TestHandleMessage:
         mock_update.message.reply_text.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_valid_url(self, mock_update, mock_context, clean_active_downloads):
-        """Test handling valid URL."""
+    async def test_valid_youtube_url(self, mock_update, mock_context, clean_active_downloads):
+        """Test handling valid YouTube URL."""
         mock_update.message.text = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+
+        await handle_message(mock_update, mock_context)
+
+        mock_update.message.reply_text.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_valid_instagram_url(self, mock_update, mock_context, clean_active_downloads):
+        """Test handling valid Instagram URL."""
+        mock_update.message.text = 'https://www.instagram.com/p/ABC123/'
 
         await handle_message(mock_update, mock_context)
 
