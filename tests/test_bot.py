@@ -1,7 +1,7 @@
 """Tests for Telegram Video Downloader Bot."""
 
 import os
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, mock_open, patch
 
 import pytest
 
@@ -22,6 +22,16 @@ from bot import (
     DownloadTask,
     format_size,
     cleanup_download,
+    _get_platform_handler,
+    _find_downloaded_file,
+    _calculate_parts,
+    _cleanup_parts,
+    _get_video_duration,
+    _send_download_error,
+    _send_video_parts,
+    _send_single_video,
+    _send_large_video,
+    _process_download_success,
 )
 from config import MAX_FILE_SIZE, DOWNLOAD_DIR
 
@@ -358,12 +368,15 @@ class TestDownloadTask:
             message_id=1,
             url=test_url,
             status_message=AsyncMock(),
+            user_name='@testuser',
         )
 
         assert task.user_id == 123
         assert task.chat_id == 456
         assert task.url == test_url
         assert task.video_path is None
+        assert task.user_name == '@testuser'
+        assert task.download_id is None
 
 
 class TestConfig:
@@ -373,3 +386,384 @@ class TestConfig:
         """Test config values."""
         assert MAX_FILE_SIZE == 50 * 1024 * 1024
         assert DOWNLOAD_DIR == 'downloads'
+
+
+class TestGetPlatformHandler:
+    """Tests for _get_platform_handler function."""
+
+    def test_youtube_platform(self):
+        """Test YouTube platform detection."""
+        handler = _get_platform_handler('https://www.youtube.com/watch?v=test')
+        assert handler is not None
+        assert handler.name == 'youtube'
+
+    def test_instagram_platform(self):
+        """Test Instagram platform detection."""
+        handler = _get_platform_handler('https://instagram.com/p/ABC/')
+        assert handler is not None
+        assert handler.name == 'instagram'
+
+    def test_unknown_platform(self):
+        """Test unknown platform returns None."""
+        handler = _get_platform_handler('https://google.com')
+        assert handler is None
+
+
+class TestFindDownloadedFile:
+    """Tests for _find_downloaded_file function."""
+
+    @patch('os.listdir')
+    @patch('os.path.getmtime')
+    def test_finds_newest_file(self, mock_getmtime, mock_listdir):
+        """Test finding the newest downloaded file."""
+        download_id = 'abc123'
+        mock_listdir.return_value = [
+            f'{download_id}_old.mp4',
+            f'{download_id}_new.mp4',
+            'other.mp4',
+        ]
+
+        # Mock different modification times
+        mock_getmtime.side_effect = [1000, 2000]
+
+        with patch('bot.os.path.join', side_effect=lambda *args: '/'.join(args)):
+            result = _find_downloaded_file(download_id)
+
+        assert result is not None
+        assert 'new.mp4' in result
+
+    @patch('os.listdir')
+    def test_returns_none_when_no_match(self, mock_listdir):
+        """Test returning None when no matching files."""
+        mock_listdir.return_value = ['other.mp4', 'different.mp4']
+
+        result = _find_downloaded_file('abc123')
+
+        assert result is None
+
+
+class TestCalculateParts:
+    """Tests for _calculate_parts function."""
+
+    def test_small_file(self):
+        """Test calculation for small file."""
+        # 10MB file, 100s duration
+        num_parts, part_duration = _calculate_parts(10 * 1024 * 1024, 100)
+
+        assert num_parts == 1
+        assert part_duration == 100.0
+
+    def test_large_file(self):
+        """Test calculation for large file."""
+        # 100MB file, 300s duration
+        num_parts, part_duration = _calculate_parts(100 * 1024 * 1024, 300)
+
+        # Target size is 45MB, so should be 3 parts
+        assert num_parts == 3
+        assert part_duration == 100.0
+
+    def test_very_large_file(self):
+        """Test calculation for very large file."""
+        # 200MB file, 600s duration
+        num_parts, part_duration = _calculate_parts(200 * 1024 * 1024, 600)
+
+        # Should be 5 parts (200/45 + 1)
+        assert num_parts == 5
+        assert part_duration == 120.0
+
+
+class TestCleanupParts:
+    """Tests for _cleanup_parts function."""
+
+    @patch('os.remove')
+    @patch('os.path.exists')
+    def test_removes_existing_parts(self, mock_exists, mock_remove):
+        """Test removing existing parts."""
+        mock_exists.return_value = True
+        parts = ['downloads/part1.mp4', 'downloads/part2.mp4']
+
+        _cleanup_parts(parts)
+
+        assert mock_remove.call_count == 2
+
+    @patch('os.remove')
+    @patch('os.path.exists')
+    def test_skips_missing_parts(self, mock_exists, mock_remove):
+        """Test skipping missing parts."""
+        mock_exists.return_value = False
+        parts = ['downloads/part1.mp4', 'downloads/part2.mp4']
+
+        _cleanup_parts(parts)
+
+        mock_remove.assert_not_called()
+
+
+class TestGetVideoDuration:
+    """Tests for _get_video_duration function."""
+
+    @patch('subprocess.run')
+    def test_success(self, mock_run):
+        """Test successful duration retrieval."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout.strip.return_value = '150.5'
+        mock_run.return_value = mock_result
+
+        duration = _get_video_duration('test.mp4')
+
+        assert duration == 150.5
+
+    @patch('subprocess.run')
+    def test_ffprobe_error(self, mock_run):
+        """Test ffprobe error handling."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = b'Error'
+        mock_run.return_value = mock_result
+
+        duration = _get_video_duration('test.mp4')
+
+        assert duration is None
+
+    @patch('subprocess.run')
+    def test_parse_error(self, mock_run):
+        """Test parsing error handling."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout.strip.return_value = 'invalid'
+        mock_run.return_value = mock_result
+
+        duration = _get_video_duration('test.mp4')
+
+        assert duration is None
+
+
+class TestSendDownloadError:
+    """Tests for _send_download_error function."""
+
+    @pytest.mark.asyncio
+    async def test_sends_error_message(self):
+        """Test sending error message to user."""
+        mock_status = AsyncMock()
+
+        await _send_download_error(mock_status)
+
+        mock_status.edit_text.assert_called_once()
+        call_args = mock_status.edit_text.call_args[0][0]
+        assert 'Не удалось скачать видео' in call_args
+        assert 'Возможные причины' in call_args
+
+
+class TestSendVideoParts:
+    """Tests for _send_video_parts function."""
+
+    @pytest.mark.asyncio
+    @patch('bot.os.remove')
+    @patch('bot.os.path.getsize')
+    @patch('builtins.open', new_callable=mock_open, read_data=b'fake video')
+    async def test_sends_all_parts(self, mock_file_open, mock_getsize, mock_remove):
+        """Test sending all video parts."""
+        mock_status = AsyncMock()
+        parts = ['downloads/part1.mp4', 'downloads/part2.mp4']
+        mock_getsize.side_effect = [45 * 1024 * 1024, 45 * 1024 * 1024]
+
+        await _send_video_parts(mock_status, parts)
+
+        assert mock_status.reply_video.call_count == 2
+        assert mock_remove.call_count == 2
+
+    @pytest.mark.asyncio
+    @patch('bot.os.remove')
+    @patch('bot.os.path.getsize')
+    @patch('builtins.open', new_callable=mock_open, read_data=b'fake video')
+    async def test_sends_without_captions(self, mock_file_open, mock_getsize, mock_remove):
+        """Test that parts are sent without captions."""
+        mock_status = AsyncMock()
+        parts = ['downloads/part1.mp4', 'downloads/part2.mp4']
+        mock_getsize.side_effect = [45 * 1024 * 1024, 45 * 1024 * 1024]
+
+        await _send_video_parts(mock_status, parts)
+
+        # Check first call has no caption
+        first_call = mock_status.reply_video.call_args_list[0]
+        assert 'caption' not in first_call[1] or first_call[1].get('caption') is None
+
+
+class TestSendSingleVideo:
+    """Tests for _send_single_video function."""
+
+    @pytest.mark.asyncio
+    @patch('bot.os.remove')
+    @patch('bot.os.path.getsize')
+    @patch('builtins.open', new_callable=mock_open, read_data=b'fake video')
+    async def test_sends_video(self, mock_file_open, mock_getsize, mock_remove):
+        """Test sending single video."""
+        mock_getsize.return_value = 10 * 1024 * 1024
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        await _send_single_video(task, 'test.mp4')
+
+        mock_status.edit_text.assert_called()
+        mock_status.reply_video.assert_called_once()
+        mock_status.delete.assert_called_once()
+        mock_remove.assert_called_once_with('test.mp4')
+
+    @pytest.mark.asyncio
+    @patch('bot.os.remove')
+    @patch('bot.os.path.getsize')
+    @patch('builtins.open', new_callable=mock_open, read_data=b'fake video')
+    async def test_sends_without_caption(self, mock_file_open, mock_getsize, mock_remove):
+        """Test that video is sent without caption."""
+        mock_getsize.return_value = 25 * 1024 * 1024
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        await _send_single_video(task, 'test.mp4')
+
+        call_args = mock_status.reply_video.call_args
+        # Check that caption is not in kwargs
+        assert 'caption' not in call_args[1] or call_args[1].get('caption') is None
+
+
+class TestSendLargeVideo:
+    """Tests for _send_large_video function."""
+
+    @pytest.mark.asyncio
+    @patch('bot.split_video')
+    @patch('bot.os.remove')
+    @patch('bot.os.path.getsize')
+    async def test_success(self, mock_getsize, _mock_remove, mock_split):
+        """Test successful large video sending."""
+        mock_getsize.return_value = 100 * 1024 * 1024
+        mock_split.return_value = ['downloads/part1.mp4', 'downloads/part2.mp4']
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        with patch('bot._send_video_parts'):
+            result = await _send_large_video(task, 'test.mp4')
+
+        assert result is True
+        mock_status.edit_text.assert_called()
+
+    @pytest.mark.asyncio
+    @patch('bot.split_video')
+    @patch('bot.cleanup_download')
+    @patch('bot.os.path.getsize')
+    async def test_split_failure(self, mock_getsize, mock_cleanup, mock_split):
+        """Test handling split failure."""
+        mock_getsize.return_value = 100 * 1024 * 1024
+        mock_split.return_value = []
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        result = await _send_large_video(task, 'test.mp4')
+
+        assert result is False
+        mock_cleanup.assert_called_once()
+
+
+class TestProcessDownloadSuccess:
+    """Tests for _process_download_success function."""
+
+    @pytest.mark.asyncio
+    @patch('bot._send_single_video')
+    @patch('bot.cleanup_download')
+    @patch('os.path.getsize')
+    async def test_small_video(self, mock_getsize, mock_cleanup, mock_send):
+        """Test processing small video."""
+        mock_getsize.return_value = 10 * 1024 * 1024
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        await _process_download_success(task, 'test.mp4')
+
+        mock_send.assert_called_once_with(task, 'test.mp4')
+        mock_cleanup.assert_called_once_with(123)
+
+    @pytest.mark.asyncio
+    @patch('bot._send_large_video')
+    @patch('bot.cleanup_download')
+    @patch('os.path.getsize')
+    async def test_large_video(self, mock_getsize, mock_cleanup, mock_send):
+        """Test processing large video."""
+        mock_getsize.return_value = 100 * 1024 * 1024
+        mock_send.return_value = True
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        await _process_download_success(task, 'test.mp4')
+
+        mock_send.assert_called_once_with(task, 'test.mp4')
+        mock_cleanup.assert_called_once_with(123)
+
+    @pytest.mark.asyncio
+    @patch('bot._send_large_video')
+    @patch('os.path.getsize')
+    async def test_large_video_failure(self, mock_getsize, mock_send):
+        """Test handling large video send failure."""
+        mock_getsize.return_value = 100 * 1024 * 1024
+        mock_send.return_value = False
+        mock_status = AsyncMock()
+
+        task = DownloadTask(
+            user_id=123,
+            chat_id=456,
+            message_id=1,
+            url='https://youtube.com/watch?v=test',
+            status_message=mock_status,
+            user_name='@testuser',
+        )
+
+        await _process_download_success(task, 'test.mp4')
+
+        # Should not cleanup on failure (cleanup happens inside _send_large_video)
+        mock_send.assert_called_once()
