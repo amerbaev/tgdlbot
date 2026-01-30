@@ -77,6 +77,25 @@ def clean_active_downloads():
     active_downloads.clear()
 
 
+@pytest.fixture
+def clean_temp_files():
+    """Clean up temporary files before/after tests."""
+    import shutil
+    temp_dirs = ['downloads', 'tests/downloads']
+
+    # Remove before test
+    for dir_path in temp_dirs:
+        if os.path.exists(dir_path):
+            shutil.rmtree(dir_path)
+
+    yield
+
+    # Remove after test
+    for dir_path in temp_dirs:
+        if os.path.exists(dir_path):
+            shutil.rmtree(dir_path)
+
+
 class TestFormatSize:
     """Tests for format_size function."""
 
@@ -125,7 +144,7 @@ class TestDownloadVideoSync:
     @patch('bot.yt_dlp.YoutubeDL')
     @patch('os.path.exists')
     @patch('os.listdir')
-    async def test_success(self, mock_listdir, mock_exists, mock_ydl_class):
+    async def test_success(self, mock_listdir, mock_exists, mock_ydl_class, clean_temp_files):
         """Test successful download."""
         mock_ydl = MagicMock()
         mock_ydl_class.return_value.__enter__.return_value = mock_ydl
@@ -150,7 +169,7 @@ class TestDownloadVideoSync:
     @pytest.mark.asyncio
     @patch('bot.yt_dlp.YoutubeDL')
     @patch('platforms.youtube.YouTubePlatform.get_format_options')
-    async def test_no_formats(self, mock_get_formats, mock_ydl_class):
+    async def test_no_formats(self, mock_get_formats, mock_ydl_class, clean_temp_files):
         """Test when no suitable format found."""
         mock_ydl = MagicMock()
         mock_ydl_class.return_value.__enter__.return_value = mock_ydl
@@ -169,7 +188,7 @@ class TestSplitVideo:
     @patch('os.path.getsize')
     @patch('os.remove')
     @patch('os.path.exists')
-    def test_success(self, mock_exists, mock_remove, mock_getsize, mock_subprocess):
+    def test_success(self, mock_exists, mock_remove, mock_getsize, mock_subprocess, clean_temp_files):
         """Test successful split with size check."""
         def getsize_side_effect(path):
             if '_part' in path:
@@ -203,7 +222,7 @@ class TestSplitVideo:
     @patch('os.path.getsize')
     @patch('os.remove')
     @patch('os.path.exists')
-    def test_retry_on_oversize(self, mock_exists, mock_remove, mock_getsize, mock_subprocess):
+    def test_retry_on_oversize(self, mock_exists, mock_remove, mock_getsize, mock_subprocess, clean_temp_files):
         """Test retry mechanism when part exceeds limit."""
         call_count = [0]
 
