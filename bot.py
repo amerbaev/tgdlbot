@@ -761,12 +761,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /help."""
+    chat_type = update.message.chat.type
+
     message = (
         '📖 *Справка*\n\n'
         '*Как использовать:*\n'
         '1. Отправьте ссылку на видео\n'
         '2. Я скачаю его в лучшем качестве\n'
         '3. Если >50MB — разобью на части\n\n'
+    )
+
+    if chat_type in ['group', 'supergroup']:
+        message += (
+            '*В группах:*\n'
+            '• Упомяните бота: @username ссылка\n'
+            '• Или reply на сообщение бота со ссылкой\n'
+            '• Или используйте команду /download ссылка\n\n'
+        )
+    else:
+        message += (
+            '*Команды:*\n'
+            '/start - Начать работу\n'
+            '/help - Справка\n\n'
+        )
+
+    message += (
         '*Поддерживаемые платформы:*\n\n'
         '*YouTube:*\n'
         '• youtube.com/watch?v=...\n'
@@ -784,10 +803,57 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(message, parse_mode='Markdown')
 
 
+async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /download для групповых чатов."""
+    # Проверяем, есть ли аргументы (URL после команды)
+    if not context.args or len(context.args) == 0:
+        await update.message.reply_text(
+            '❌ Укажите ссылку после команды.\n\n'
+            'Пример: /download https://youtube.com/watch?v=...'
+        )
+        return
+
+    # Получаем URL из аргументов команды
+    url = ' '.join(context.args)
+
+    # Создаём mock update для повторного использования handle_message
+    # Но подменяем text на URL из аргументов
+    original_text = update.message.text
+    update.message.text = url
+
+    try:
+        await handle_message(update, context)
+    finally:
+        # Восстанавливаем оригинальный текст
+        update.message.text = original_text
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений (ссылки на YouTube/Instagram)."""
     url = update.message.text.strip()
     user_id = update.effective_user.id
+    chat_type = update.message.chat.type
+
+    # В групповых чатах проверяем упоминание бота или reply
+    if chat_type in ['group', 'supergroup']:
+        bot_username = context.bot.username
+        text = update.message.text or ''
+
+        # Проверяем: упоминание бота, reply на сообщение бота, или команда
+        mentioned = (
+            f'@{bot_username}' in text or
+            (update.message.reply_to_message and
+             update.message.reply_to_message.from_user.id == context.bot.id) or
+            text.startswith('/')
+        )
+
+        if not mentioned:
+            # Игнорируем сообщения без упоминания бота в группах
+            return
+
+        # Убираем упоминание бота из URL если есть
+        if f'@{bot_username}' in text:
+            url = text.replace(f'@{bot_username}', '').strip()
 
     # Получаем имя пользователя для отображения
     user = update.effective_user
@@ -799,6 +865,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Проверка поддерживаемых URL
     platform = detect_platform(url)
     if not platform:
+        # В группах не отвечаем на неверные ссылки без упоминания
+        if chat_type in ['group', 'supergroup']:
+            return
         await update.message.reply_text(
             '❌ Неверная ссылка.\n\n'
             'Поддерживаются:\n'
@@ -865,6 +934,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler('start', start_command))
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('download', download_command))
     application.add_handler(CallbackQueryHandler(cancel_button, pattern='^cancel_'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

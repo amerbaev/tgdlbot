@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from bot import (
     start_command,
     help_command,
+    download_command,
     handle_message,
     is_youtube_url,
     is_instagram_url,
@@ -48,8 +49,12 @@ def mock_update():
     update.message.text = ''
     update.message.chat_id = 123456
     update.message.message_id = 1
+    update.message.chat = Mock()
+    update.message.chat.type = 'private'  # По умолчанию личный чат
     update.effective_user = Mock()
     update.effective_user.id = 123
+    update.effective_user.username = 'testuser'
+    update.effective_user.first_name = 'Test'
     return update
 
 
@@ -57,6 +62,9 @@ def mock_update():
 def mock_context():
     """Mock Context object."""
     context = Mock()
+    context.bot = Mock()
+    context.bot.id = 1  # bot user ID
+    context.bot.username = 'tgdlbot'
     return context
 
 
@@ -293,6 +301,29 @@ class TestCommands:
         assert 'youtube.com' in message
         assert 'instagram.com' in message
 
+    @pytest.mark.asyncio
+    async def test_download_command_no_args(self, mock_update, mock_context):
+        """Test /download command without arguments."""
+        mock_context.args = []
+
+        await download_command(mock_update, mock_context)
+
+        mock_update.message.reply_text.assert_called_once()
+        call_args = mock_update.message.reply_text.call_args
+        message = call_args[0][0]
+
+        assert 'Укажите ссылку' in message
+
+    @pytest.mark.asyncio
+    async def test_download_command_with_url(self, mock_update, mock_context, clean_active_downloads):
+        """Test /download command with URL."""
+        mock_context.args = ['https://www.youtube.com/watch?v=dQw4w9WgXcQ']
+        mock_update.message.reply_text = AsyncMock()  # Reset mock
+
+        await download_command(mock_update, mock_context)
+
+        mock_update.message.reply_text.assert_called_once()
+
 
 class TestHandleMessage:
     """Tests for message handling."""
@@ -354,6 +385,46 @@ class TestHandleMessage:
         message = call_args[0][0]
 
         assert 'уже скачиваете' in message or 'Уже скачиваете' in message
+
+    @pytest.mark.asyncio
+    async def test_group_ignores_without_mention(self, mock_update, mock_context, clean_active_downloads):
+        """Test that group messages without bot mention are ignored."""
+        mock_update.message.chat.type = 'supergroup'
+        mock_update.message.text = 'https://www.youtube.com/watch?v=dQw4w9WggXcQ'
+        mock_update.message.reply_to_message = None
+
+        await handle_message(mock_update, mock_context)
+
+        # Не должен отвечать на сообщения без упоминания в группах
+        mock_update.message.reply_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_group_with_mention(self, mock_update, mock_context, clean_active_downloads):
+        """Test that group messages with bot mention are processed."""
+        mock_update.message.chat.type = 'supergroup'
+        mock_update.message.text = '@tgdlbot https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+        mock_update.message.reply_to_message = None
+
+        await handle_message(mock_update, mock_context)
+
+        # Должен ответить на сообщение с упоминанием
+        mock_update.message.reply_text.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_group_with_reply_to_bot(self, mock_update, mock_context, clean_active_downloads):
+        """Test that replies to bot messages are processed."""
+        mock_update.message.chat.type = 'supergroup'
+        mock_update.message.text = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+
+        # Mock reply_to_message
+        reply_msg = Mock()
+        reply_msg.from_user.id = 1  # bot ID
+        mock_update.message.reply_to_message = reply_msg
+
+        await handle_message(mock_update, mock_context)
+
+        # Должен ответить на reply
+        mock_update.message.reply_text.assert_called_once()
 
 
 class TestDownloadTask:
