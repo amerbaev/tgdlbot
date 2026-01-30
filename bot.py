@@ -815,17 +815,70 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Получаем URL из аргументов команды
     url = ' '.join(context.args)
+    user_id = update.effective_user.id
+    chat_type = update.message.chat.type
 
-    # Создаём mock update для повторного использования handle_message
-    # Но подменяем text на URL из аргументов
-    original_text = update.message.text
-    update.message.text = url
+    # Получаем имя пользователя для отображения
+    user = update.effective_user
+    if user.username:
+        user_name = f'@{user.username}'
+    else:
+        user_name = user.first_name or f'User_{user_id}'
 
-    try:
-        await handle_message(update, context)
-    finally:
-        # Восстанавливаем оригинальный текст
-        update.message.text = original_text
+    # Проверка поддерживаемых URL
+    platform = detect_platform(url)
+    if not platform:
+        if chat_type in ['group', 'supergroup']:
+            return
+        await update.message.reply_text(
+            '❌ Неверная ссылка.\n\n'
+            'Поддерживаются:\n'
+            '• YouTube (youtube.com, youtu.be)\n'
+            '• Instagram (instagram.com/p, instagram.com/reel)\n\n'
+            'Пожалуйста, отправьте действительную ссылку.'
+        )
+        return
+
+    # Проверка активной загрузки
+    if user_id in active_downloads:
+        await update.message.reply_text(
+            '⚠️ Вы уже скачиваете видео!\n'
+            'Дождитесь окончания текущей загрузки.'
+        )
+        return
+
+    # Создаём статусное сообщение
+    status_message = await update.message.reply_text('⏳ Добавлено в очередь...')
+
+    # Генерируем ID для этого скачивания
+    download_id = str(uuid.uuid4())[:8]
+
+    # Создаём задачу
+    task = DownloadTask(
+        user_id=user_id,
+        chat_id=update.message.chat_id,
+        message_id=update.message.message_id,
+        url=url,
+        status_message=status_message,
+        user_name=user_name,
+        download_id=download_id,
+    )
+
+    # Регистрируем активную загрузку
+    active_downloads[user_id] = {
+        'chat_id': update.message.chat_id,
+        'message_id': update.message.message_id,
+        'status': 'downloading',
+        'url': url,
+        'download_id': download_id,
+    }
+
+    # Запускаем фоновую задачу
+    bg_task = asyncio.create_task(process_download(task))
+    bg_task.add_done_callback(background_tasks.discard)
+    background_tasks.add(bg_task)
+
+    logger.info(f'[User {user_id}] Задача добавлена: {url}')
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
