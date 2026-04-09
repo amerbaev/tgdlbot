@@ -717,10 +717,6 @@ async def process_download(task: DownloadTask) -> None:
                 await task.status_message.edit_text('❌ Загрузка отменена')
             except Exception:
                 pass
-            if video_path and os.path.exists(video_path):
-                cleanup_download(user_id, video_path)
-            else:
-                cleanup_download(user_id)
             return
 
         if not video_path or not os.path.exists(video_path):
@@ -736,6 +732,7 @@ async def process_download(task: DownloadTask) -> None:
         except Exception as msg_error:
             logger.warning(f'[User {user_id}] Не удалось обновить статус: {msg_error}')
 
+    finally:
         cleanup_download(user_id, video_path)
 
 
