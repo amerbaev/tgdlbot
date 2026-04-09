@@ -445,6 +445,52 @@ class TestHandleMessage:
         # Должен ответить на reply
         mock_update.message.reply_text.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_download_failure_cleans_active_downloads(self, mock_update, mock_context, clean_active_downloads):
+        """Test that failed download removes user from active_downloads."""
+        from bot import active_downloads, process_download, DownloadTask
+
+        # Setup mock update and context
+        user_id = 123
+        chat_id = 123456
+        url = 'https://youtube.com/watch?v=test123'
+
+        mock_update.effective_user.id = user_id
+        mock_update.message.chat_id = chat_id
+        mock_update.message.message_id = 1
+        mock_update.message.text = url
+        mock_update.effective_user.username = 'testuser'
+
+        # Create mock status message
+        status_message = await mock_update.message.reply_text('⏳ Добавлено в очередь...')
+        status_message.edit_text = AsyncMock()
+
+        # Create task
+        task = DownloadTask(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=1,
+            url=url,
+            status_message=status_message,
+            user_name='@testuser',
+            download_id='test123',
+        )
+
+        # Add user to active_downloads (simulating download started)
+        active_downloads[user_id] = {
+            'chat_id': chat_id,
+            'message_id': 1,
+            'status': 'downloading',
+            'url': url,
+            'download_id': 'test123',
+        }
+
+        # Process download (will fail because URL is invalid)
+        await process_download(task)
+
+        # Verify user is removed from active_downloads
+        assert user_id not in active_downloads
+
 
 class TestDownloadTask:
     """Tests for DownloadTask dataclass."""
