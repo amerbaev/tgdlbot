@@ -491,6 +491,98 @@ class TestHandleMessage:
         # Verify user is removed from active_downloads
         assert user_id not in active_downloads
 
+    @pytest.mark.asyncio
+    async def test_download_cancellation_cleans_active_downloads(self, mock_update, mock_context, clean_active_downloads):
+        """Test that cancelled download triggers cleanup in finally block."""
+        from bot import active_downloads, cancelled_downloads, process_download, DownloadTask
+
+        user_id = 123
+        chat_id = 123456
+        url = 'https://youtube.com/watch?v=test123'
+
+        mock_update.effective_user.id = user_id
+        mock_update.message.chat_id = chat_id
+        mock_update.message.message_id = 1
+        mock_update.message.text = url
+        mock_update.effective_user.username = 'testuser'
+
+        status_message = await mock_update.message.reply_text('⏳ Добавлено в очередь...')
+        status_message.edit_text = AsyncMock()
+
+        task = DownloadTask(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=1,
+            url=url,
+            status_message=status_message,
+            user_name='@testuser',
+            download_id='test123',
+        )
+
+        # Add user to active_downloads and mark as cancelled
+        active_downloads[user_id] = {
+            'chat_id': chat_id,
+            'message_id': 1,
+            'status': 'downloading',
+            'url': url,
+            'download_id': 'test123',
+        }
+        cancelled_downloads.add(user_id)
+
+        # Process download (will be cancelled)
+        await process_download(task)
+
+        # Verify user is removed from active_downloads by finally block
+        assert user_id not in active_downloads
+
+        # Clean up
+        cancelled_downloads.discard(user_id)
+
+    @pytest.mark.asyncio
+    async def test_exception_in_download_triggers_cleanup(self, mock_update, mock_context, clean_active_downloads):
+        """Test that exceptions during download still trigger cleanup."""
+        from bot import active_downloads, process_download, DownloadTask
+        from unittest.mock import patch
+
+        user_id = 123
+        chat_id = 123456
+        url = 'https://youtube.com/watch?v=test123'
+
+        mock_update.effective_user.id = user_id
+        mock_update.message.chat_id = chat_id
+        mock_update.message.message_id = 1
+        mock_update.message.text = url
+        mock_update.effective_user.username = 'testuser'
+
+        status_message = await mock_update.message.reply_text('⏳ Добавлено в очередь...')
+        status_message.edit_text = AsyncMock()
+
+        task = DownloadTask(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=1,
+            url=url,
+            status_message=status_message,
+            user_name='@testuser',
+            download_id='test123',
+        )
+
+        # Add user to active_downloads
+        active_downloads[user_id] = {
+            'chat_id': chat_id,
+            'message_id': 1,
+            'status': 'downloading',
+            'url': url,
+            'download_id': 'test123',
+        }
+
+        # Mock asyncio.to_thread to raise exception
+        with patch('bot.asyncio.to_thread', side_effect=Exception('Test error')):
+            await process_download(task)
+
+        # Verify user is removed from active_downloads by finally block
+        assert user_id not in active_downloads
+
 
 class TestDownloadTask:
     """Tests for DownloadTask dataclass."""
