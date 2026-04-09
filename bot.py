@@ -676,8 +676,6 @@ async def _process_download_success(task: DownloadTask, video_path: str) -> None
     else:
         await _send_single_video(task, video_path)
 
-    cleanup_download(task.user_id)
-
 
 async def process_download(task: DownloadTask) -> None:
     """Асинхронная обработка скачивания видео.

@@ -836,9 +836,8 @@ class TestProcessDownloadSuccess:
 
     @pytest.mark.asyncio
     @patch('bot._send_single_video')
-    @patch('bot.cleanup_download')
     @patch('os.path.getsize')
-    async def test_small_video(self, mock_getsize, mock_cleanup, mock_send):
+    async def test_small_video(self, mock_getsize, mock_send):
         """Test processing small video."""
         mock_getsize.return_value = 10 * 1024 * 1024
         mock_status = AsyncMock()
@@ -855,13 +854,11 @@ class TestProcessDownloadSuccess:
         await _process_download_success(task, 'test.mp4')
 
         mock_send.assert_called_once_with(task, 'test.mp4')
-        mock_cleanup.assert_called_once_with(123)
 
     @pytest.mark.asyncio
     @patch('bot._send_large_video')
-    @patch('bot.cleanup_download')
     @patch('os.path.getsize')
-    async def test_large_video(self, mock_getsize, mock_cleanup, mock_send):
+    async def test_large_video(self, mock_getsize, mock_send):
         """Test processing large video."""
         mock_getsize.return_value = 100 * 1024 * 1024
         mock_send.return_value = True
@@ -879,7 +876,6 @@ class TestProcessDownloadSuccess:
         await _process_download_success(task, 'test.mp4')
 
         mock_send.assert_called_once_with(task, 'test.mp4')
-        mock_cleanup.assert_called_once_with(123)
 
     @pytest.mark.asyncio
     @patch('bot._send_large_video')
