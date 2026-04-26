@@ -15,7 +15,7 @@ Telegram бот для скачивания видео с YouTube и Instagram.
 
 ## Требования
 
-- Python 3.13+
+- Python 3.14+
 - Docker (опционально)
 
 ## Быстрый старт
