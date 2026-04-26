@@ -15,8 +15,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
-__pycache__/**/
-**/__pycache__/
+__pycache__/
 
 # OS
 .DS_Store
