@@ -1,7 +1,7 @@
 # ==========================================
 # Stage 1: Builder (установка зависимостей)
 # ==========================================
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ RUN uv sync --frozen --no-dev
 # ==========================================
 # Stage 2: Production
 # ==========================================
-FROM python:3.13-slim AS production
+FROM python:3.14-slim AS production
 
 LABEL maintainer="tgdlbot"
 LABEL description="Telegram YouTube Downloader Bot"
@@ -59,7 +59,7 @@ CMD ["uv", "run", "python", "bot.py"]
 # ==========================================
 # Stage 3: Test
 # ==========================================
-FROM python:3.13-slim AS test
+FROM python:3.14-slim AS test
 
 WORKDIR /app
 
