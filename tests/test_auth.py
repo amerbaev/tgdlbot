@@ -43,3 +43,10 @@ def test_empty_file_raises_error(tmp_path):
     whitelist_file.write_text("")
     with pytest.raises(ValueError, match="No valid user IDs found"):
         load_whitelist(str(whitelist_file))
+
+
+def test_missing_file_raises_error(tmp_path):
+    """Missing file raises FileNotFoundError."""
+    whitelist_file = tmp_path / "nonexistent.txt"
+    with pytest.raises(FileNotFoundError, match="whitelist.txt not found"):
+        load_whitelist(str(whitelist_file))
