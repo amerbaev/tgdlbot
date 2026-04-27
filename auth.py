@@ -1,3 +1,5 @@
+import logging
+
 def load_whitelist(filepath: str = "whitelist.txt") -> set[int]:
     """Load user IDs from whitelist file.
 
@@ -27,7 +29,6 @@ def load_whitelist(filepath: str = "whitelist.txt") -> set[int]:
                     user_id = int(line)
                     user_ids.add(user_id)
                 except ValueError:
-                    import logging
                     logging.warning(f'Invalid user ID in whitelist: {line}')
 
     except FileNotFoundError:
