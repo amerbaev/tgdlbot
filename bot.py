@@ -21,6 +21,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 import yt_dlp
 
 from config import BOT_TOKEN, DOWNLOAD_DIR, MAX_FILE_SIZE
@@ -724,7 +725,8 @@ async def process_download(task: DownloadTask) -> None:
         await _process_download_success(task, video_path)
 
     except Exception as e:
-        logger.error(f'[User {user_id}] Ошибка обработки: {e}')
+        import traceback
+        logger.error(f'[User {user_id}] Ошибка обработки: {e}\n{traceback.format_exc()}')
         try:
             await task.status_message.edit_text(f'❌ Ошибка: {e}')
         except Exception as msg_error:
@@ -978,7 +980,16 @@ def main() -> None:
     logger.info('Запуск бота...')
     logger.info('Макс. одновременных скачиваний: 3')
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Configure longer timeouts for file uploads
+    request = HTTPXRequest(
+        read_timeout=30.0,
+        write_timeout=30.0,
+        connect_timeout=10.0,
+        pool_timeout=1.0,
+        media_write_timeout=60.0,
+    )
+
+    application = Application.builder().token(BOT_TOKEN).request(request).build()
 
     application.add_handler(CommandHandler('start', start_command))
     application.add_handler(CommandHandler('help', help_command))
