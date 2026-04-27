@@ -26,6 +26,7 @@ import yt_dlp
 
 from config import BOT_TOKEN, DOWNLOAD_DIR, MAX_FILE_SIZE
 from platforms import YouTubePlatform, InstagramPlatform
+from auth import load_whitelist, is_user_allowed
 
 
 # Constants
@@ -54,6 +55,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 active_downloads: dict[int, dict] = {}
 background_tasks: set[asyncio.Task] = set()
 cancelled_downloads: set[int] = set()  # IDs of cancelled downloads
+whitelist: set[int] = set()  # Allowed user IDs
 
 
 @dataclass
@@ -976,6 +978,14 @@ def main() -> None:
             'TELEGRAM_BOT_TOKEN не найден в переменных окружения. '
             'Создайте .env файл с токеном бота.'
         )
+
+    # Load whitelist
+    try:
+        whitelist = load_whitelist()
+        logger.info(f'Loaded {len(whitelist)} whitelisted users')
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f'Failed to load whitelist: {e}')
+        raise
 
     logger.info('Запуск бота...')
     logger.info('Макс. одновременных скачиваний: 3')
