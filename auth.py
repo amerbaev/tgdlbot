@@ -38,3 +38,16 @@ def load_whitelist(filepath: str = "whitelist.txt") -> set[int]:
         raise ValueError('No valid user IDs found in whitelist.txt')
 
     return user_ids
+
+
+def is_user_allowed(user_id: int, whitelist: set[int]) -> bool:
+    """Check if user is allowed to use bot.
+
+    Args:
+        user_id: Telegram user ID
+        whitelist: Set of allowed user IDs
+
+    Returns:
+        True if user allowed, False otherwise
+    """
+    return user_id in whitelist

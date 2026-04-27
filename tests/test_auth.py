@@ -1,6 +1,6 @@
 import pytest
 import logging
-from auth import load_whitelist
+from auth import load_whitelist, is_user_allowed
 
 def test_load_valid_whitelist(tmp_path):
     """Load whitelist with valid user IDs."""
@@ -50,3 +50,15 @@ def test_missing_file_raises_error(tmp_path):
     whitelist_file = tmp_path / "nonexistent.txt"
     with pytest.raises(FileNotFoundError, match="whitelist.txt not found"):
         load_whitelist(str(whitelist_file))
+
+
+def test_is_user_allowed_true():
+    """Whitelisted user returns True."""
+    whitelist = {123456789, 987654321}
+    assert is_user_allowed(123456789, whitelist) is True
+
+
+def test_is_user_allowed_false():
+    """Non-whitelisted user returns False."""
+    whitelist = {123456789, 987654321}
+    assert is_user_allowed(111222333, whitelist) is False
