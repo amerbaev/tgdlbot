@@ -35,3 +35,11 @@ def test_load_invalid_ids(tmp_path, caplog):
     result = load_whitelist(str(whitelist_file))
     assert result == {123456789, 987654321}
     assert "Invalid user ID in whitelist: invalid_id" in caplog.text
+
+
+def test_empty_file_raises_error(tmp_path):
+    """Empty file raises ValueError."""
+    whitelist_file = tmp_path / "whitelist.txt"
+    whitelist_file.write_text("")
+    with pytest.raises(ValueError, match="No valid user IDs found"):
+        load_whitelist(str(whitelist_file))
