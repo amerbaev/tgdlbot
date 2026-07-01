@@ -27,3 +27,6 @@ Thumbs.db
 # FFmpeg (используется системный в Docker)
 ffmpeg.exe
 ffmpeg
+
+# Claude
+.claude/
