@@ -123,9 +123,26 @@ Cookies не гарантируют доступ к удалённому рол�
 # Локально
 uv run pytest tests/ -v
 
-# В Docker
-docker-compose run tgdlbot uv run pytest tests/ -v
+# В Docker (отдельный test-образ)
+docker compose --profile test run --build --rm test
 ```
+
+### Сборка Docker-образов
+
+```bash
+docker build --target production -t tgdlbot:production .
+docker build --target test -t tgdlbot:test .
+docker run --rm --network none tgdlbot:test
+```
+
+Сборка требует BuildKit (включён по умолчанию в актуальном Docker). Зависимости
+устанавливаются по `uv.lock` до копирования кода и тестов: изменение исходников
+не запускает их установку заново. Кеш uv сохраняется между сборками через
+BuildKit cache mount и не попадает в итоговые образы.
+
+Версия uv закреплена в Dockerfile; он нужен только на стадиях сборки. Готовые
+образы запускают Python из `/app/.venv` напрямую. Production содержит ffmpeg
+и работает от `appuser` (UID 1000), а test дополнительно содержит dev-зависимости.
 
 ## Использование
 

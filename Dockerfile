@@ -1,81 +1,65 @@
-# ==========================================
-# Stage 1: Builder (установка зависимостей)
-# ==========================================
-FROM python:3.14-slim AS builder
+# syntax=docker/dockerfile:1
+
+FROM python:3.14-slim AS base
 
 WORKDIR /app
 
-# Копирование файлов проекта
+ENV PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+
+# Зависимости кешируются отдельно от исходного кода.
+FROM base AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /usr/local/bin/uv
+
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+
 COPY pyproject.toml uv.lock ./
 
-# Установка uv
-RUN pip install --no-cache-dir uv
-
-# Установка ТОЛЬКО production зависимостей
-RUN uv sync --frozen --no-dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-install-project
 
 
-# ==========================================
-# Stage 2: Production
-# ==========================================
-FROM python:3.14-slim AS production
+# Тестовые зависимости дополняют готовое production-окружение.
+FROM builder AS test-builder
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --extra dev --no-install-project
+
+
+FROM base AS production
 
 LABEL maintainer="tgdlbot"
 LABEL description="Telegram YouTube Downloader Bot"
 
-# Минимальная установка ffmpeg
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && apt-get clean \
+    && useradd -m -u 1000 appuser \
+    && install -d -o appuser -g appuser /app /app/downloads
 
-WORKDIR /app
+# Владельца задаём при копировании, не дублируя .venv слоем chown -R.
+COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
+COPY --chown=appuser:appuser bot.py config.py ./
+COPY --chown=appuser:appuser platforms ./platforms/
 
-# Установка uv (нужен для запуска)
-RUN pip install --no-cache-dir uv
-
-# Копирование virtualenv из builder
-COPY --from=builder /app/.venv /app/.venv
-
-ENV PYTHONUNBUFFERED=1
-
-# Копирование кода приложения
-COPY bot.py config.py ./
-COPY platforms ./platforms/
-
-# Создание директории для загрузок
-RUN mkdir -p downloads
-
-# Неглавный пользователь
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
 USER appuser
 
-CMD ["uv", "run", "python", "bot.py"]
+CMD ["python", "bot.py"]
 
 
-# ==========================================
-# Stage 3: Test
-# ==========================================
-FROM python:3.14-slim AS test
+FROM base AS test
 
-WORKDIR /app
-
-# Установка uv
-RUN pip install --no-cache-dir uv
-
-# Копирование .venv из builder
-COPY --from=builder /app/.venv /app/.venv
-
-# Копирование кода и тестов
-COPY pyproject.toml uv.lock ./
+COPY --from=test-builder /app/.venv /app/.venv
+# pyproject.toml содержит настройки pytest, включая asyncio_mode.
+COPY pyproject.toml ./
 COPY bot.py config.py ./
 COPY platforms ./platforms/
 COPY tests ./tests/
 
-# Доустановка dev зависимостей
-RUN uv sync --extra dev
-
-CMD ["uv", "run", "pytest", "tests/", "-v"]
+CMD ["python", "-m", "pytest", "tests/", "-v"]

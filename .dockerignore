@@ -1,23 +1,31 @@
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
 *.so
 .Python
 build/
 develop-eggs/
 dist/
-downloads/*.mp4
-downloads/*.webm
-downloads/*.mkv
+downloads/
 
 # Environment
 .env
+.env.*
 cookies/
 .venv
 venv/
 ENV/
 env/
+
+# Local tools and agent files
+ffmpeg
+ffmpeg.exe
+ffprobe
+ffprobe.exe
+.claude/
+.codex/
+.agents/
 
 # IDE
 .idea/

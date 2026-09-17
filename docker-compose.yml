@@ -27,4 +27,3 @@ services:
       - .env
     profiles:
       - test  # Только при явном вызове
-    command: ["uv", "run", "pytest", "tests/", "-v"]
