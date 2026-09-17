@@ -10,6 +10,7 @@ services:
       - .env
     volumes:
       - ./downloads:/app/downloads
+      - ./cookies:/app/cookies:ro
     logging:
       driver: "json-file"
       options:

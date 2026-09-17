@@ -13,6 +13,7 @@ downloads/*.mkv
 
 # Environment
 .env
+cookies/
 .venv
 venv/
 ENV/

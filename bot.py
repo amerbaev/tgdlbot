@@ -10,6 +10,7 @@ import os
 import subprocess
 import uuid
 from dataclasses import dataclass
+from io import StringIO
 from typing import Any, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,7 +25,7 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 import yt_dlp
 
-from config import BOT_TOKEN, DOWNLOAD_DIR, MAX_FILE_SIZE
+from config import BOT_TOKEN, DOWNLOAD_DIR, INSTAGRAM_COOKIES_FILE, MAX_FILE_SIZE
 from platforms import YouTubePlatform, InstagramPlatform
 
 
@@ -45,6 +46,9 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
 )
+# HTTP request URLs contain the Telegram bot token.
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Create download directory
@@ -136,6 +140,18 @@ def _get_platform_handler(url: str) -> Optional[Any]:
     return None
 
 
+def _get_ytdlp_options(url: str) -> dict:
+    """Общие настройки анализа и скачивания, включая сессию Instagram."""
+    instagram = is_instagram_url(url)
+    options = {'quiet': True, 'no_warnings': not instagram}
+    if instagram and INSTAGRAM_COOKIES_FILE:
+        # yt-dlp saves cookies on close. Give each instance a private in-memory
+        # copy so read-only Docker mounts and parallel downloads are safe.
+        with open(INSTAGRAM_COOKIES_FILE, encoding='utf-8') as cookie_file:
+            options['cookiefile'] = StringIO(cookie_file.read())
+    return options
+
+
 def _get_video_info(url: str, platform_name: str, download_id: str) -> Optional[dict]:
     """Получает информацию о видео.
 
@@ -147,14 +163,18 @@ def _get_video_info(url: str, platform_name: str, download_id: str) -> Optional[
     Returns:
         Информация о видео или None
     """
-    info_opts = {'quiet': True, 'no_warnings': True}
-
     try:
+        info_opts = _get_ytdlp_options(url)
         with yt_dlp.YoutubeDL(info_opts) as ydl:
             logger.info(f'[Thread] [{download_id}] Анализ ({platform_name}): {url}')
             return ydl.extract_info(url, download=False)
     except Exception as e:
         logger.error(f'[Thread] [{download_id}] Ошибка получения информации: {e}')
+        if platform_name == 'instagram' and 'empty media response' in str(e).lower():
+            logger.warning(
+                'Instagram не вернул данные видео. Проверьте доступность ролика '
+                'в браузере и настройте или обновите INSTAGRAM_COOKIES_FILE.'
+            )
         return None
 
 
@@ -212,8 +232,6 @@ def _try_download_format(
     download_opts = {
         'format': format_selector,
         'outtmpl': os.path.join(DOWNLOAD_DIR, f'{download_id}_%(title)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
         'merge_output_format': 'mp4',
     }
 
@@ -221,6 +239,7 @@ def _try_download_format(
         download_opts['extractor_args'] = extractor_args
 
     try:
+        download_opts.update(_get_ytdlp_options(url))
         with yt_dlp.YoutubeDL(download_opts) as download_ydl:
             download_ydl.download([url])
             info_after = download_ydl.extract_info(url, download=False)
@@ -561,12 +580,24 @@ async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.info(f'[User {user_id}] Загрузка отменена пользователем')
 
 
-async def _send_download_error(status_message: Any) -> None:
+async def _send_download_error(status_message: Any, platform_name: Optional[str] = None) -> None:
     """Отправляет сообщение об ошибке скачивания.
 
     Args:
         status_message: Статусное сообщение для редактирования
+        platform_name: Платформа, на которой произошла ошибка
     """
+    if platform_name == 'instagram':
+        await status_message.edit_text(
+            '❌ Не удалось скачать видео из Instagram.\n\n'
+            'Возможные причины:\n'
+            '• Для просмотра требуется вход в Instagram\n'
+            '• Видео удалено или доступ к нему ограничен\n'
+            '• Instagram временно ограничил запросы бота\n\n'
+            'Попробуйте позже или сообщите администратору бота.'
+        )
+        return
+
     await status_message.edit_text(
         '❌ Не удалось скачать видео.\n\n'
         'Возможные причины:\n'
@@ -719,7 +750,7 @@ async def process_download(task: DownloadTask) -> None:
             return
 
         if not video_path or not os.path.exists(video_path):
-            await _send_download_error(task.status_message)
+            await _send_download_error(task.status_message, detect_platform(url))
             return
 
         await _process_download_success(task, video_path)
