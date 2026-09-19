@@ -14,6 +14,7 @@ from io import StringIO
 from typing import Any, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1000,6 +1001,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info(f'[User {user_id}] Задача добавлена: {url}')
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log transient connection failures without interrupting polling retries."""
+    error = context.error
+    # BadRequest inherits from NetworkError, but retrying cannot fix an invalid request.
+    if isinstance(error, NetworkError) and not isinstance(error, BadRequest):
+        if update is None:
+            logger.warning(
+                'Связь с Telegram прервана (%s). Получение сообщений будет повторено автоматически.',
+                type(error).__name__,
+            )
+        else:
+            logger.warning(
+                'Не удалось обработать сообщение из-за сетевой ошибки (%s). '
+                'После восстановления связи повторите команду.',
+                type(error).__name__,
+            )
+        return
+
+    logger.error('Необработанная ошибка Telegram', exc_info=error)
+
+
 def main() -> None:
     """Запуск бота."""
     if not BOT_TOKEN:
@@ -1021,6 +1043,7 @@ def main() -> None:
     )
 
     application = Application.builder().token(BOT_TOKEN).request(request).build()
+    application.add_error_handler(error_handler)
 
     application.add_handler(CommandHandler('start', start_command))
     application.add_handler(CommandHandler('help', help_command))
@@ -1028,8 +1051,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cancel_button, pattern='^cancel_'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info('Бот запущен!')
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info('Подключение к Telegram...')
+    # Polling already retries indefinitely; also retry initialization (getMe/deleteWebhook).
+    application.run_polling(allowed_updates=Update.ALL_TYPES, bootstrap_retries=-1)
 
 
 if __name__ == '__main__':
