@@ -24,10 +24,6 @@ from bot import (
     format_size,
     cleanup_download,
     _get_platform_handler,
-    _find_downloaded_file,
-    _calculate_parts,
-    _cleanup_parts,
-    _get_video_duration,
     _send_download_error,
     _send_video_parts,
     _send_single_video,
@@ -35,6 +31,7 @@ from bot import (
     _process_download_success,
 )
 from config import MAX_FILE_SIZE, DOWNLOAD_DIR
+from media import _calculate_parts, _cleanup_parts, _get_video_duration
 
 
 @pytest.fixture
@@ -69,31 +66,25 @@ def mock_context():
 
 
 @pytest.fixture
-def clean_active_downloads():
-    """Clear active downloads before/after each test."""
-    from bot import active_downloads
-    active_downloads.clear()
+async def clean_active_downloads(monkeypatch):
+    """Keep handler tests offline and finish their tasks before clearing state."""
+    import asyncio
+    import bot
+    bot.active_downloads.clear()
+    bot.cancelled_downloads.clear()
+    monkeypatch.setattr(bot, 'download_video_sync', lambda *args: None)
     yield
-    active_downloads.clear()
+    if bot.background_tasks:
+        await asyncio.gather(*list(bot.background_tasks))
+    bot.active_downloads.clear()
+    bot.cancelled_downloads.clear()
 
 
 @pytest.fixture
-def clean_temp_files():
-    """Clean up temporary files before/after tests."""
-    import shutil
-    temp_dirs = ['downloads', 'tests/downloads']
-
-    # Remove before test
-    for dir_path in temp_dirs:
-        if os.path.exists(dir_path):
-            shutil.rmtree(dir_path)
-
-    yield
-
-    # Remove after test
-    for dir_path in temp_dirs:
-        if os.path.exists(dir_path):
-            shutil.rmtree(dir_path)
+def clean_temp_files(tmp_path, monkeypatch):
+    """Use a disposable working directory instead of deleting user downloads."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'downloads').mkdir()
 
 
 class TestFormatSize:
@@ -142,7 +133,7 @@ class TestDownloadVideoSync:
 
     @pytest.mark.asyncio
     @patch('bot.yt_dlp.YoutubeDL')
-    @patch('os.path.exists')
+    @patch('os.path.isfile')
     @patch('os.listdir')
     async def test_success(self, mock_listdir, mock_exists, mock_ydl_class, clean_temp_files):
         """Test successful download."""
@@ -164,7 +155,7 @@ class TestDownloadVideoSync:
             result = download_video_sync('https://www.youtube.com/watch?v=test')
 
         assert result is not None
-        mock_ydl.download.assert_called()
+        assert mock_ydl.extract_info.call_args.kwargs['download'] is True
 
     @pytest.mark.asyncio
     @patch('bot.yt_dlp.YoutubeDL')
@@ -637,39 +628,6 @@ class TestGetPlatformHandler:
         assert handler is None
 
 
-class TestFindDownloadedFile:
-    """Tests for _find_downloaded_file function."""
-
-    @patch('os.listdir')
-    @patch('os.path.getmtime')
-    def test_finds_newest_file(self, mock_getmtime, mock_listdir):
-        """Test finding the newest downloaded file."""
-        download_id = 'abc123'
-        mock_listdir.return_value = [
-            f'{download_id}_old.mp4',
-            f'{download_id}_new.mp4',
-            'other.mp4',
-        ]
-
-        # Mock different modification times
-        mock_getmtime.side_effect = [1000, 2000]
-
-        with patch('bot.os.path.join', side_effect=lambda *args: '/'.join(args)):
-            result = _find_downloaded_file(download_id)
-
-        assert result is not None
-        assert 'new.mp4' in result
-
-    @patch('os.listdir')
-    def test_returns_none_when_no_match(self, mock_listdir):
-        """Test returning None when no matching files."""
-        mock_listdir.return_value = ['other.mp4', 'different.mp4']
-
-        result = _find_downloaded_file('abc123')
-
-        assert result is None
-
-
 class TestCalculateParts:
     """Tests for _calculate_parts function."""
 
@@ -783,38 +741,25 @@ class TestSendDownloadError:
 
 
 class TestSendVideoParts:
-    """Tests for _send_video_parts function."""
-
     @pytest.mark.asyncio
-    @patch('bot.os.remove')
-    @patch('bot.os.path.getsize')
-    @patch('builtins.open', new_callable=mock_open, read_data=b'fake video')
-    async def test_sends_all_parts(self, mock_file_open, mock_getsize, mock_remove):
-        """Test sending all video parts."""
-        mock_status = AsyncMock()
-        parts = ['downloads/part1.mp4', 'downloads/part2.mp4']
-        mock_getsize.side_effect = [45 * 1024 * 1024, 45 * 1024 * 1024]
+    async def test_sends_all_parts_and_removes_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        directory = tmp_path / 'downloads'
+        directory.mkdir()
+        paths = [directory / 'part1.mp4', directory / 'part2.mp4']
+        for path, content in zip(paths, (b'first', b'second')):
+            path.write_bytes(content)
+        received = []
 
-        await _send_video_parts(mock_status, parts)
+        async def send(**kwargs):
+            received.append(kwargs['video'].read())
+            assert 'caption' not in kwargs
 
-        assert mock_status.reply_video.call_count == 2
-        assert mock_remove.call_count == 2
-
-    @pytest.mark.asyncio
-    @patch('bot.os.remove')
-    @patch('bot.os.path.getsize')
-    @patch('builtins.open', new_callable=mock_open, read_data=b'fake video')
-    async def test_sends_without_captions(self, mock_file_open, mock_getsize, mock_remove):
-        """Test that parts are sent without captions."""
-        mock_status = AsyncMock()
-        parts = ['downloads/part1.mp4', 'downloads/part2.mp4']
-        mock_getsize.side_effect = [45 * 1024 * 1024, 45 * 1024 * 1024]
-
-        await _send_video_parts(mock_status, parts)
-
-        # Check first call has no caption
-        first_call = mock_status.reply_video.call_args_list[0]
-        assert 'caption' not in first_call[1] or first_call[1].get('caption') is None
+        status = AsyncMock()
+        status.reply_video.side_effect = send
+        await _send_video_parts(status, [str(path) for path in paths])
+        assert received == [b'first', b'second']
+        assert not any(path.exists() for path in paths)
 
 
 class TestSendSingleVideo:
@@ -843,7 +788,7 @@ class TestSendSingleVideo:
         mock_status.edit_text.assert_called()
         mock_status.reply_video.assert_called_once()
         mock_status.delete.assert_called_once()
-        mock_remove.assert_called_once_with('test.mp4')
+        mock_remove.assert_not_called()  # process_download owns the original file
 
     @pytest.mark.asyncio
     @patch('bot.os.remove')
@@ -920,7 +865,7 @@ class TestSendLargeVideo:
         result = await _send_large_video(task, 'test.mp4')
 
         assert result is False
-        mock_cleanup.assert_called_once()
+        mock_cleanup.assert_not_called()  # released once by process_download.finally
 
 
 class TestProcessDownloadSuccess:
@@ -989,5 +934,5 @@ class TestProcessDownloadSuccess:
 
         await _process_download_success(task, 'test.mp4')
 
-        # Should not cleanup on failure (cleanup happens inside _send_large_video)
+        # Original file and user slot belong to process_download.finally
         mock_send.assert_called_once()

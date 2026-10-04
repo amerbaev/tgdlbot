@@ -29,6 +29,10 @@ class TestYouTubePlatform:
             'https://www.youtube.com/shorts/dQw4w9WgXcQ',
             'youtube.com/watch?v=dQw4w9WgXcQ',
             'youtu.be/dQw4w9WgXcQ',
+            'https://youtube.com/watch?feature=share&v=test123#t=30',
+            'https://youtube.com/shorts/test_123-/?feature=share',
+            'www.youtu.be/test123?t=30',
+            'https://youtu.be/watch',
         ]
 
         for url in valid_urls:
@@ -45,6 +49,28 @@ class TestYouTubePlatform:
 
         for url in invalid_urls:
             assert not platform.is_valid_url(url), f'{url} should be invalid'
+
+    @pytest.mark.parametrize('url', [
+        'https://youtube.com/playlist?list=test',
+        'https://youtube.com/channel/test',
+        'https://youtube.com/@test',
+        'https://youtube.com/redirect?q=https://example.com',
+        'https://youtube.com/watch',
+        'https://youtube.com/watch?feature=share',
+        'https://youtube.com/watch?v=',
+        'https://youtube.com/watch?v=test&v=other',
+        'https://youtube.com/watch?v=test&v=',
+        'https://youtube.com/watch?v=test%2Fother',
+        'https://youtube.com/watch?v=test+other',
+        'youtube.com/watch?next=https://example.com',
+        'https://youtube.com/shorts/test/extra',
+        'https://youtu.be/test/extra',
+        'https://youtube.com.evil.example/watch?v=test',
+        'https://youtube.com@evil.example/watch?v=test',
+        'https://user@youtube.com/watch?v=test',
+    ])
+    def test_rejects_unsupported_or_ambiguous_video_urls(self, url):
+        assert not YouTubePlatform().is_valid_url(url)
 
 
 class TestEstimateFormatSize:
@@ -82,6 +108,34 @@ class TestEstimateFormatSize:
 
         result = estimate_format_size(info, 715)  # Close to 720
         assert result == 50 * 1024 * 1024
+
+    def test_adds_audio_to_video_only_size(self):
+        info = {'formats': [
+            {'height': 1080, 'vcodec': 'avc1', 'acodec': 'none', 'filesize': 60_000},
+            {'vcodec': 'none', 'acodec': 'aac', 'filesize': 10_000},
+        ]}
+
+        assert estimate_format_size(info, 1080) == 70_000
+
+    @pytest.mark.parametrize(('video_size', 'audio_size'), [
+        (None, 10_000),
+        (60_000, None),
+        (None, None),
+    ])
+    def test_unknown_dash_component_makes_total_unknown(self, video_size, audio_size):
+        info = {'formats': [
+            {'height': 1080, 'vcodec': 'avc1', 'acodec': 'none', 'filesize': video_size},
+            {'vcodec': 'none', 'acodec': 'aac', 'filesize': audio_size},
+        ]}
+
+        assert estimate_format_size(info, 1080) is None
+
+    def test_video_only_without_audio_has_unknown_total(self):
+        info = {'formats': [
+            {'height': 1080, 'vcodec': 'avc1', 'acodec': 'none', 'filesize': 60_000},
+        ]}
+
+        assert estimate_format_size(info, 1080) is None
 
 
 class TestSelectBestFormat:
@@ -125,6 +179,14 @@ class TestSelectBestFormat:
         # Should start with 720p, not 1080p
         first_selector = result[0][0]
         assert 'height<=720' in first_selector
+
+    def test_skips_high_resolution_when_audio_pushes_total_over_limit(self):
+        info = {'formats': [
+            {'height': 1080, 'vcodec': 'avc1', 'acodec': 'none', 'filesize': 70 * 1024 * 1024},
+            {'vcodec': 'none', 'acodec': 'aac', 'filesize': 10 * 1024 * 1024},
+        ]}
+
+        assert 'height<=480' in select_best_format(info)[0][0]
 
     def test_skips_when_size_unknown(self):
         """Test that 1080p/720p are skipped when size is unknown."""

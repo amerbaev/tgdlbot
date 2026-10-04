@@ -14,7 +14,10 @@ class InstagramPlatform(BasePlatform):
     @property
     def url_pattern(self) -> str:
         # Поддерживает посты и Reels
-        return r'^(https?://)?(www\.)?instagram\.com/(p|reel)/.+$'
+        return (
+            r'(?:https?://)?(?:www\.)?instagram\.com/(?:p|reel)/[A-Za-z0-9_-]+/?'
+            r'(?:\?[^#]*)?(?:#.*)?'
+        )
 
     def get_format_options(self, info: dict) -> List[Tuple[str, Optional[dict]]]:
         """Возвращает лучшее доступное качество для Instagram.

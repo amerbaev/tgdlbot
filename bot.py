@@ -7,11 +7,10 @@ and sends them to Telegram, splitting large files into 50MB parts.
 import asyncio
 import logging
 import os
-import subprocess
 import uuid
 from dataclasses import dataclass
 from io import StringIO
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, NetworkError
@@ -26,15 +25,13 @@ from telegram.ext import (
 from telegram.request import HTTPXRequest
 import yt_dlp
 
-from config import BOT_TOKEN, DOWNLOAD_DIR, INSTAGRAM_COOKIES_FILE, MAX_FILE_SIZE
-from platforms import YouTubePlatform, InstagramPlatform
+from config import (
+    BOT_TOKEN, DOWNLOAD_DIR, INSTAGRAM_COOKIES_FILE, MAX_FILE_SIZE,
+    MAX_CONCURRENT_DOWNLOADS, MAX_DOWNLOAD_SIZE,
+)
+from media import format_size, is_safe_path, split_video, _cleanup_parts
+from platforms import BasePlatform, YouTubePlatform, InstagramPlatform
 
-
-# Constants
-MB = 1024 * 1024
-TARGET_SIZE_MB = 45  # 90% of 50MB limit for safety
-MAX_RETRIES = 2
-RETRY_DURATION_MULTIPLIER = 0.8  # Reduce duration by 20% on retry
 
 # Platform handlers
 youtube_platform = YouTubePlatform()
@@ -51,9 +48,6 @@ logging.basicConfig(
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-
-# Create download directory
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # Global state
 active_downloads: dict[int, dict] = {}
@@ -75,32 +69,6 @@ class DownloadTask:
     download_id: Optional[str] = None
 
 
-def format_size(bytes_size: int) -> str:
-    """Форматирование байт в MB строку."""
-    return f'{bytes_size / MB:.1f}MB'
-
-
-def is_safe_path(path: str, base_dir: str = DOWNLOAD_DIR) -> bool:
-    """Проверка, что путь находится внутри базовой директории.
-
-    Args:
-        path: Путь для проверки
-        base_dir: Базовая директория
-
-    Returns:
-        True если путь безопасен
-    """
-    try:
-        # Получаем абсолютный путь
-        abs_path = os.path.abspath(path)
-        abs_base = os.path.abspath(base_dir)
-
-        # Проверяем, что путь начинается с базовой директории
-        return abs_path.startswith(abs_base + os.sep) or abs_path == abs_base
-    except (ValueError, TypeError):
-        return False
-
-
 def is_youtube_url(url: str) -> bool:
     """Проверка, является ли URL ссылкой на YouTube."""
     return youtube_platform.is_valid_url(url)
@@ -112,39 +80,31 @@ def is_instagram_url(url: str) -> bool:
 
 
 def detect_platform(url: str) -> Optional[str]:
-    """Определяет платформу по URL.
-
-    Args:
-        url: URL для проверки
-
-    Returns:
-        Название платформы ('youtube', 'instagram') или None
-    """
-    for platform in PLATFORMS:
-        if platform.is_valid_url(url):
-            return platform.name
-    return None
+    handler = _get_platform_handler(url)
+    return handler.name if handler else None
 
 
-def _get_platform_handler(url: str) -> Optional[Any]:
-    """Определяет платформу по URL.
-
-    Args:
-        url: URL для проверки
-
-    Returns:
-        Обработчик платформы или None
-    """
-    for platform in PLATFORMS:
-        if platform.is_valid_url(url):
-            return platform
-    return None
+def _get_platform_handler(url: str) -> Optional[BasePlatform]:
+    return next((platform for platform in PLATFORMS if platform.is_valid_url(url)), None)
 
 
-def _get_ytdlp_options(url: str) -> dict:
+def _check_download_progress(progress: dict, cancelled: Optional[Callable[[], bool]]) -> None:
+    if cancelled and cancelled():
+        raise yt_dlp.utils.DownloadCancelled('Загрузка отменена')
+    if (progress.get('downloaded_bytes') or 0) > MAX_DOWNLOAD_SIZE:
+        raise yt_dlp.utils.DownloadCancelled('Превышен лимит размера загрузки')
+
+
+def _get_ytdlp_options(url: str, cancelled: Optional[Callable[[], bool]] = None) -> dict:
     """Общие настройки анализа и скачивания, включая сессию Instagram."""
     instagram = is_instagram_url(url)
-    options = {'quiet': True, 'no_warnings': not instagram}
+    options = {
+        'quiet': True, 'no_warnings': not instagram,
+        'noplaylist': True, 'playlistend': 1,
+        'socket_timeout': 30, 'retries': 3, 'fragment_retries': 3,
+        'max_filesize': MAX_DOWNLOAD_SIZE,
+        'progress_hooks': [lambda progress: _check_download_progress(progress, cancelled)],
+    }
     if instagram and INSTAGRAM_COOKIES_FILE:
         # yt-dlp saves cookies on close. Give each instance a private in-memory
         # copy so read-only Docker mounts and parallel downloads are safe.
@@ -179,24 +139,17 @@ def _get_video_info(url: str, platform_name: str, download_id: str) -> Optional[
         return None
 
 
-def _find_downloaded_file(download_id: str) -> Optional[str]:
-    """Ищет скачанный файл по download_id.
-
-    Args:
-        download_id: ID скачивания
-
-    Returns:
-        Путь к файлу или None
-    """
-    mp4_files = [
-        os.path.join(DOWNLOAD_DIR, f)
-        for f in os.listdir(DOWNLOAD_DIR)
-        if f.startswith(download_id) and f.endswith('.mp4')
-    ]
-
-    if mp4_files:
-        return max(mp4_files, key=os.path.getmtime)
-    return None
+def _cleanup_download_files(download_id: str, keep: Optional[str] = None) -> None:
+    """Remove only files belonging to this job, including incomplete attempts."""
+    try:
+        paths = [
+            os.path.join(DOWNLOAD_DIR, name)
+            for name in os.listdir(DOWNLOAD_DIR)
+            if name.startswith(f'{download_id}_')
+        ]
+        _cleanup_parts([path for path in paths if path != keep], base_dir=DOWNLOAD_DIR)
+    except OSError as error:
+        logger.warning('Не удалось очистить загрузку %s: %s', download_id, error)
 
 
 def _try_download_format(
@@ -206,379 +159,113 @@ def _try_download_format(
     extractor_args: Optional[dict],
     attempt: int,
     total: int,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Optional[str]:
-    """Пытается скачать видео в указанном формате.
-
-    Args:
-        url: URL видео
-        download_id: ID для логирования
-        format_selector: Селектор формата
-        extractor_args: Аргументы экстрактора
-        attempt: Номер попытки
-        total: Общее количество попыток
-
-    Returns:
-        Путь к скачанному файлу или None
-    """
-    client_name = (
-        extractor_args.get('youtube', {}).get('player_client', 'default')
-        if extractor_args
-        else 'default'
-    )
-    logger.info(
-        f'[Thread] [{download_id}] Попытка {attempt}/{total}: '
-        f'{format_selector} (client: {client_name})'
-    )
-
-    download_opts = {
-        'format': format_selector,
-        'outtmpl': os.path.join(DOWNLOAD_DIR, f'{download_id}_%(title)s.%(ext)s'),
-        'merge_output_format': 'mp4',
-    }
-
-    if extractor_args:
-        download_opts['extractor_args'] = extractor_args
-
+    logger.info('[%s] Попытка %s/%s: %s', download_id, attempt, total, format_selector)
     try:
-        download_opts.update(_get_ytdlp_options(url))
-        with yt_dlp.YoutubeDL(download_opts) as download_ydl:
-            download_ydl.download([url])
-            info_after = download_ydl.extract_info(url, download=False)
-            filename = download_ydl.prepare_filename(info_after)
-
-            if os.path.exists(filename):
-                file_size = os.path.getsize(filename)
-                logger.info(
-                    f'[Thread] [{download_id}] Скачано: '
-                    f'{format_selector}, размер: {format_size(file_size)}'
-                )
-                return filename
-
-            # Ищем новейший файл с нашим ID
-            newest_file = _find_downloaded_file(download_id)
-            if newest_file:
-                file_size = os.path.getsize(newest_file)
-                logger.info(
-                    f'[Thread] [{download_id}] Скачано: '
-                    f'{format_selector}, размер: {format_size(file_size)}'
-                )
-                return newest_file
-
-    except Exception as e:
-        logger.warning(
-            f'[Thread] [{download_id}] Формат {format_selector} не сработал: {e}'
-        )
-
+        options = _get_ytdlp_options(url, cancelled)
+        options.update({
+            'format': format_selector,
+            # Neither remote titles nor IDs influence the local filename.
+            'outtmpl': os.path.join(DOWNLOAD_DIR, f'{download_id}_{attempt}.%(ext)s'),
+            'merge_output_format': 'mp4',
+        })
+        if extractor_args:
+            options['extractor_args'] = extractor_args
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info or info.get('_type') in ('playlist', 'multi_video'):
+                return None
+            filename = ydl.prepare_filename(info)
+            # A merge may change the selected format's extension to mp4.
+            for path in dict.fromkeys((os.path.splitext(filename)[0] + '.mp4', filename)):
+                if is_safe_path(path, DOWNLOAD_DIR) and os.path.isfile(path):
+                    size = os.path.getsize(path)
+                    if 0 < size <= MAX_DOWNLOAD_SIZE:
+                        return path
+    except yt_dlp.utils.DownloadCancelled:
+        raise
+    except Exception as error:
+        logger.warning('[%s] Формат %s не сработал: %s', download_id, format_selector, error)
     return None
 
 
-def download_video_sync(url: str) -> Optional[str]:
-    """Синхронное скачивание видео (выполняется в thread pool).
-
-    Args:
-        url: Ссылка на YouTube или Instagram видео
-
-    Returns:
-        Путь к скачанному файлу или None при ошибке
-    """
-    download_id = str(uuid.uuid4())[:8]
-
-    # Определяем платформу
-    platform_handler = _get_platform_handler(url)
-    if not platform_handler:
-        logger.error(f'[{download_id}] Неизвестная платформа для URL: {url}')
-        return None
-
-    # Получаем информацию о видео
-    info = _get_video_info(url, platform_handler.name, download_id)
-    if not info:
-        return None
-
-    # Получаем опции форматов от платформы
-    formats_to_try = platform_handler.get_format_options(info)
-    if not formats_to_try:
-        logger.warning(f'[Thread] [{download_id}] Подходящий формат не найден')
-        return None
-
-    # Пробуем каждый формат
-    for i, (format_selector, extractor_args) in enumerate(formats_to_try, 1):
-        result = _try_download_format(
-            url, download_id, format_selector, extractor_args, i, len(formats_to_try)
-        )
-        if result:
-            return result
-
-    logger.error(f'[Thread] [{download_id}] Все форматы не сработали')
-    return None
-
-
-def _get_video_duration(video_path: str) -> Optional[float]:
-    """Получает длительность видео через ffprobe.
-
-    Args:
-        video_path: Путь к видео
-
-    Returns:
-        Длительность в секундах или None
-    """
-    result = subprocess.run(
-        [
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            video_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        logger.error(f'[Thread] Ошибка ffprobe: {result.stderr}')
-        return None
-
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        logger.error(f'[Thread] Не удалось распарсить длительность: {result.stdout}')
-        return None
-
-
-def _calculate_parts(file_size: int, duration: float) -> tuple[int, float]:
-    """Вычисляет количество частей и длительность каждой.
-
-    Args:
-        file_size: Размер файла в байтах
-        duration: Длительность видео в секундах
-
-    Returns:
-        Кортеж (количество_частей, длительность_части)
-    """
-    target_size = MAX_FILE_SIZE * (TARGET_SIZE_MB / 50.0)
-    num_parts = int(file_size / target_size) + 1
-    part_duration = duration / num_parts
-    return num_parts, part_duration
-
-
-def _cleanup_parts(parts: list[str]) -> None:
-    """Удаляет все созданные части.
-
-    Args:
-        parts: Список путей к частям
-    """
-    for part_path in parts:
-        if os.path.exists(part_path):
-            os.remove(part_path)
-
-
-def _create_video_part(
-    video_path: str,
-    output_path: str,
-    start_time: float,
-    part_duration: float,
-) -> bool:
-    """Создаёт одну часть видео.
-
-    Args:
-        video_path: Путь к исходному видео
-        output_path: Путь для выходного файла
-        start_time: Начальное время в секундах
-        part_duration: Длительность части в секундах
-
-    Returns:
-        True если успешно, иначе False
-    """
-    try:
-        subprocess.run(
-            [
-                'ffmpeg', '-i', video_path,
-                '-ss', str(start_time),
-                '-t', str(part_duration),
-                '-c', 'copy',
-                '-y',
-                output_path,
-            ],
-            capture_output=True,
-            check=True,
-        )
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(
-            f'[Thread] Ошибка ffmpeg: '
-            f'{e.stderr.decode() if e.stderr else str(e)}'
-        )
-        return False
-
-
-def _split_part_with_retry(
-    video_path: str,
-    output_path: str,
-    start_time: float,
-    initial_duration: float,
-    part_index: int,
-    total_parts: int,
+def download_video_sync(
+    url: str,
+    download_id: Optional[str] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Optional[str]:
-    """Создаёт часть с ретраями если превышен размер.
-
-    Args:
-        video_path: Путь к исходному видео
-        output_path: Путь для выходного файла
-        start_time: Начальное время в секундах
-        initial_duration: Начальная длительность части
-        part_index: Номер части
-        total_parts: Общее количество частей
-
-    Returns:
-        Путь к части или None при ошибке
-    """
-    part_duration = initial_duration
-
-    for attempt in range(MAX_RETRIES):
-        if not _create_video_part(video_path, output_path, start_time, part_duration):
-            return None
-
-        actual_size = os.path.getsize(output_path)
-
-        if actual_size <= MAX_FILE_SIZE:
-            logger.info(
-                f'[Thread] Часть {part_index}/{total_parts}: '
-                f'{format_size(actual_size)}'
-            )
-            return output_path
-
-        # Часть слишком большая
-        logger.warning(
-            f'[Thread] Часть {part_index} слишком большая: {format_size(actual_size)}'
-        )
-
-        if attempt < MAX_RETRIES - 1:
-            os.remove(output_path)
-            part_duration *= RETRY_DURATION_MULTIPLIER
-            logger.info(
-                f'[Thread] Попытка {attempt+2}: '
-                f'длительность уменьшена до {part_duration:.1f}s'
-            )
-        else:
-            os.remove(output_path)
-            logger.error(f'[Thread] Часть {part_index} превышает лимит, отказываемся')
-            return None
-
-    return None
-
-
-def split_video(video_path: str) -> list[str]:
-    """Разбиение видео на части до 50MB каждая.
-
-    Args:
-        video_path: Путь к исходному видео
-
-    Returns:
-        Список путей к частям или пустой список при ошибке
-    """
-    # Проверка безопасности пути
-    if not is_safe_path(video_path):
-        logger.error(f'[Thread] Небезопасный путь: {video_path}')
-        return []
-
+    """Download one video and remove artifacts from failed format attempts."""
+    download_id = download_id or uuid.uuid4().hex
+    platform = _get_platform_handler(url)
+    if not platform:
+        return None
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    result = None
     try:
-        # Получаем длительность
-        duration = _get_video_duration(video_path)
-        if not duration:
-            return []
-
-        # Вычисляем параметры разбиения
-        file_size = os.path.getsize(video_path)
-        num_parts, part_duration = _calculate_parts(file_size, duration)
-
-        output_files: list[str] = []
-
-        for i in range(num_parts):
-            start_time = i * part_duration
-            output_path = video_path.replace('.mp4', f'_part{i+1}.mp4')
-
-            # Проверка безопасности выходного пути
-            if not is_safe_path(output_path):
-                logger.error(f'[Thread] Небезопасный путь: {output_path}')
-                _cleanup_parts(output_files)
-                return []
-
-            # Создаём часть с ретраями
-            result = _split_part_with_retry(
-                video_path,
-                output_path,
-                start_time,
-                part_duration,
-                i + 1,
-                num_parts,
+        if cancelled and cancelled():
+            return None
+        info = _get_video_info(url, platform.name, download_id)
+        if not info or info.get('is_live') or info.get('_type') in ('playlist', 'multi_video'):
+            return None
+        formats = platform.get_format_options(info)
+        for attempt, (selector, extractor_args) in enumerate(formats, 1):
+            if cancelled and cancelled():
+                return None
+            result = _try_download_format(
+                url, download_id, selector, extractor_args, attempt, len(formats), cancelled,
             )
-
-            if not result:
-                _cleanup_parts(output_files)
-                return []
-
-            output_files.append(result)
-
-        return output_files
-
-    except Exception as e:
-        logger.error(f'[Thread] Ошибка разбиения: {e}')
-        return []
+            if result:
+                return result
+            _cleanup_download_files(download_id)
+        return None
+    except yt_dlp.utils.DownloadCancelled:
+        return None
+    finally:
+        _cleanup_download_files(download_id, keep=result)
 
 
-def cleanup_download(user_id: int, video_path: Optional[str] = None) -> None:
-    """Очистка ресурсов после завершения или ошибки.
-
-    Args:
-        user_id: Telegram ID пользователя
-        video_path: Опциональный путь к видео для удаления
-    """
-    if user_id in active_downloads:
-        del active_downloads[user_id]
-
-    # Очищаем из отменённых
+def cleanup_download(
+    user_id: int, video_path: Optional[str] = None, download_id: Optional[str] = None,
+) -> None:
+    """Release the user's slot and clean all files owned by the finished job."""
+    state = active_downloads.pop(user_id, {})
     cancelled_downloads.discard(user_id)
-
-    if video_path and os.path.exists(video_path):
-        # Проверка безопасности перед удалением
-        if not is_safe_path(video_path):
-            logger.warning(f'Небезопасный путь при очистке: {video_path}')
-            return
-
-        try:
-            os.remove(video_path)
-        except OSError as e:
-            logger.warning(f'Не удалось удалить {video_path}: {e}')
+    if video_path:
+        _cleanup_parts([video_path], base_dir=DOWNLOAD_DIR)
+    download_id = download_id or state.get('download_id')
+    if download_id:
+        _cleanup_download_files(download_id)
 
 
 async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик кнопки отмены."""
     query = update.callback_query
-    await query.answer()
-
-    # Парсим callback_data: "cancel_{user_id}"
-    callback_data = query.data
-    if not callback_data or not callback_data.startswith('cancel_'):
+    if not query:
         return
-
     try:
-        user_id = int(callback_data.split('_')[1])
-    except (IndexError, ValueError):
+        prefix, user, download_id = (query.data or '').split('_', 2)
+        user_id = int(user)
+    except (ValueError, AttributeError):
+        await query.answer()
         return
-
-    # Проверяем, что нажал тот же пользователь
+    if prefix != 'cancel':
+        await query.answer()
+        return
     if query.from_user.id != user_id:
-        await query.edit_message_text('❌ Это не ваша загрузка!')
+        await query.answer('Это не ваша загрузка!', show_alert=True)
         return
-
-    # Помечаем как отменённую
+    state = active_downloads.get(user_id)
+    if not state or state.get('download_id') != download_id:
+        await query.answer('Эта загрузка уже завершена.')
+        return
     cancelled_downloads.add(user_id)
-
-    # Обновляем сообщение
+    await query.answer()
     try:
         await query.edit_message_text('❌ Загрузка отменена')
-    except Exception as e:
-        logger.warning(f'Не удалось обновить сообщение: {e}')
-
-    logger.info(f'[User {user_id}] Загрузка отменена пользователем')
+    except Exception as error:
+        logger.warning('Не удалось обновить сообщение отмены: %s', error)
 
 
 async def _send_download_error(status_message: Any, platform_name: Optional[str] = None) -> None:
@@ -592,6 +279,7 @@ async def _send_download_error(status_message: Any, platform_name: Optional[str]
         await status_message.edit_text(
             '❌ Не удалось скачать видео из Instagram.\n\n'
             'Возможные причины:\n'
+            f'• Размер видео превышает {format_size(MAX_DOWNLOAD_SIZE)}\n'
             '• Для просмотра требуется вход в Instagram\n'
             '• Видео удалено или доступ к нему ограничен\n'
             '• Instagram временно ограничил запросы бота\n\n'
@@ -602,7 +290,7 @@ async def _send_download_error(status_message: Any, platform_name: Optional[str]
     await status_message.edit_text(
         '❌ Не удалось скачать видео.\n\n'
         'Возможные причины:\n'
-        '• Видео слишком большое\n'
+        f'• Размер видео превышает {format_size(MAX_DOWNLOAD_SIZE)}\n'
         '• Видео недоступно\n'
         '• Ограничения YouTube\n\n'
         'Попробуйте другое видео.'
@@ -619,14 +307,13 @@ async def _send_video_parts(
         status_message: Статусное сообщение
         parts: Список путей к частям
     """
-    for i, part_path in enumerate(parts, 1):
-        part_size = os.path.getsize(part_path)
-
-        with open(part_path, 'rb') as part_file:
-            await status_message.reply_video(video=part_file)
-
-        logger.info(f'Отправлена часть {i}/{len(parts)}')
-        os.remove(part_path)
+    try:
+        for i, part_path in enumerate(parts, 1):
+            with open(part_path, 'rb') as part_file:
+                await status_message.reply_video(video=part_file)
+            logger.info('Отправлена часть %s/%s', i, len(parts))
+    finally:
+        _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
 
 
 async def _send_large_video(
@@ -647,21 +334,29 @@ async def _send_large_video(
         f'Разбиваю на части...'
     )
 
-    parts = await asyncio.to_thread(split_video, video_path)
+    worker = asyncio.create_task(asyncio.to_thread(split_video, video_path))
+    try:
+        parts = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancelled_downloads.add(task.user_id)
+        parts = await worker
+        _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
+        raise
 
     if not parts:
         await task.status_message.edit_text(
             '❌ Не удалось разбить видео'
         )
-        cleanup_download(task.user_id, video_path)
         return False
 
-    await task.status_message.edit_text(
-        f'📤 Отправляю {len(parts)} частей...'
-    )
-
-    await _send_video_parts(task.status_message, parts)
-    os.remove(video_path)
+    try:
+        if task.user_id not in cancelled_downloads:
+            await task.status_message.edit_text(f'📤 Отправляю {len(parts)} частей...')
+            await _send_video_parts(task.status_message, parts)
+        else:
+            return False
+    finally:
+        _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
 
     await task.status_message.edit_text(
         f'✅ {task.user_name}, видео отправлено {len(parts)} частями!'
@@ -683,13 +378,10 @@ async def _send_single_video(
     """
     await task.status_message.edit_text('📤 Отправляю видео...')
 
-    file_size = os.path.getsize(video_path)
-
     with open(video_path, 'rb') as video_file:
         await task.status_message.reply_video(video=video_file)
 
     await task.status_message.delete()
-    os.remove(video_path)
     logger.info(f'[User {task.user_id}] Видео отправлено')
 
 
@@ -720,6 +412,7 @@ async def process_download(task: DownloadTask) -> None:
     url = task.url
     video_path: Optional[str] = None
     user_mention = task.user_name
+    task.download_id = task.download_id or uuid.uuid4().hex
 
     try:
         # Проверяем отмену
@@ -729,7 +422,7 @@ async def process_download(task: DownloadTask) -> None:
 
         # Создаём клавиатуру с кнопкой отмены
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Отмена", callback_data=f'cancel_{user_id}')
+            InlineKeyboardButton("❌ Отмена", callback_data=f'cancel_{user_id}_{task.download_id}')
         ]])
 
         await task.status_message.edit_text(
@@ -740,7 +433,19 @@ async def process_download(task: DownloadTask) -> None:
         )
 
         logger.info(f'[User {user_id}] Запуск скачивания: {url}')
-        video_path = await asyncio.to_thread(download_video_sync, url)
+        worker = asyncio.create_task(asyncio.to_thread(
+            download_video_sync, url, task.download_id,
+            lambda: user_id in cancelled_downloads,
+        ))
+        try:
+            video_path = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop its worker. Keep ownership until
+            # it exits so cleanup cannot race with writes or a new user request.
+            cancelled_downloads.add(user_id)
+            video_path = await worker
+            raise
+        task.video_path = video_path
 
         # Проверяем отмену после скачивания
         if user_id in cancelled_downloads:
@@ -756,16 +461,15 @@ async def process_download(task: DownloadTask) -> None:
 
         await _process_download_success(task, video_path)
 
-    except Exception as e:
-        import traceback
-        logger.error(f'[User {user_id}] Ошибка обработки: {e}\n{traceback.format_exc()}')
+    except Exception:
+        logger.exception('[User %s] Ошибка обработки', user_id)
         try:
-            await task.status_message.edit_text(f'❌ Ошибка: {e}')
+            await task.status_message.edit_text('❌ Не удалось обработать видео. Попробуйте позже.')
         except Exception as msg_error:
             logger.warning(f'[User {user_id}] Не удалось обновить статус: {msg_error}')
 
     finally:
-        cleanup_download(user_id, video_path)
+        cleanup_download(user_id, video_path, task.download_id)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -781,8 +485,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         '/start - Начать работу\n'
         '/help - Справка\n\n'
         '⚠️ *Ограничения:*\n'
-        '• Макс. размер файла: 50MB\n'
-        '• Только публичные видео'
+        f'• Исходное видео: до {format_size(MAX_DOWNLOAD_SIZE)}\n'
+        '• Часть для отправки: до 50MB\n'
+        '• Без плейлистов и прямых трансляций'
     )
 
     await update.message.reply_text(message, parse_mode='Markdown')
@@ -826,179 +531,82 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         '*Качество:*\n'
         '• YouTube: автоматический выбор (1080p → 720p → 480p → 360p)\n'
         '• Instagram: лучшее доступное\n\n'
-        'Без привязки к аккаунту!'
+        'Доступность видео зависит от ограничений платформы.'
     )
 
     await update.message.reply_text(message, parse_mode='Markdown')
 
 
+async def _start_download(update: Update, url: str) -> None:
+    user = update.effective_user
+    message = update.message
+    if not user or not message:
+        return
+    user_id = user.id
+    if not detect_platform(url):
+        if message.chat.type not in ('group', 'supergroup'):
+            await message.reply_text(
+                '❌ Неверная ссылка. Отправьте ссылку на видео YouTube или Instagram.'
+            )
+        return
+    if user_id in active_downloads:
+        await message.reply_text('⚠️ Вы уже скачиваете видео! Дождитесь окончания загрузки.')
+        return
+    if len(active_downloads) >= MAX_CONCURRENT_DOWNLOADS:
+        await message.reply_text('⏳ Бот сейчас занят. Попробуйте немного позже.')
+        return
+    download_id = uuid.uuid4().hex
+    active_downloads[user_id] = {'download_id': download_id}
+    try:
+        status = await message.reply_text('⏳ Добавлено в очередь...')
+        task = DownloadTask(
+            user_id, message.chat_id, message.message_id, url, status,
+            f'@{user.username}' if user.username else user.first_name or f'User_{user_id}',
+            download_id=download_id,
+        )
+        bg_task = asyncio.create_task(process_download(task))
+        background_tasks.add(bg_task)
+        bg_task.add_done_callback(background_tasks.discard)
+    except BaseException:
+        cleanup_download(user_id, download_id=download_id)
+        raise
+
+
 async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /download для групповых чатов."""
-    # Проверяем, есть ли аргументы (URL после команды)
-    if not context.args or len(context.args) == 0:
+    if not update.message or not update.effective_user:
+        return
+    if not context.args:
         await update.message.reply_text(
             '❌ Укажите ссылку после команды.\n\n'
             'Пример: /download https://youtube.com/watch?v=...'
         )
         return
-
-    # Получаем URL из аргументов команды
-    url = ' '.join(context.args)
-    user_id = update.effective_user.id
-    chat_type = update.message.chat.type
-
-    # Получаем имя пользователя для отображения
-    user = update.effective_user
-    if user.username:
-        user_name = f'@{user.username}'
-    else:
-        user_name = user.first_name or f'User_{user_id}'
-
-    # Проверка поддерживаемых URL
-    platform = detect_platform(url)
-    if not platform:
-        if chat_type in ['group', 'supergroup']:
-            return
-        await update.message.reply_text(
-            '❌ Неверная ссылка.\n\n'
-            'Поддерживаются:\n'
-            '• YouTube (youtube.com, youtu.be)\n'
-            '• Instagram (instagram.com/p, instagram.com/reel)\n\n'
-            'Пожалуйста, отправьте действительную ссылку.'
-        )
-        return
-
-    # Проверка активной загрузки
-    if user_id in active_downloads:
-        await update.message.reply_text(
-            '⚠️ Вы уже скачиваете видео!\n'
-            'Дождитесь окончания текущей загрузки.'
-        )
-        return
-
-    # Создаём статусное сообщение
-    status_message = await update.message.reply_text('⏳ Добавлено в очередь...')
-
-    # Генерируем ID для этого скачивания
-    download_id = str(uuid.uuid4())[:8]
-
-    # Создаём задачу
-    task = DownloadTask(
-        user_id=user_id,
-        chat_id=update.message.chat_id,
-        message_id=update.message.message_id,
-        url=url,
-        status_message=status_message,
-        user_name=user_name,
-        download_id=download_id,
-    )
-
-    # Регистрируем активную загрузку
-    active_downloads[user_id] = {
-        'chat_id': update.message.chat_id,
-        'message_id': update.message.message_id,
-        'status': 'downloading',
-        'url': url,
-        'download_id': download_id,
-    }
-
-    # Запускаем фоновую задачу
-    bg_task = asyncio.create_task(process_download(task))
-    bg_task.add_done_callback(background_tasks.discard)
-    background_tasks.add(bg_task)
-
-    logger.info(f'[User {user_id}] Задача добавлена: {url}')
+    await _start_download(update, ' '.join(context.args).strip())
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик текстовых сообщений (ссылки на YouTube/Instagram)."""
-    url = update.message.text.strip()
-    user_id = update.effective_user.id
-    chat_type = update.message.chat.type
-
-    # В групповых чатах проверяем упоминание бота или reply
-    if chat_type in ['group', 'supergroup']:
-        bot_username = context.bot.username
-        text = update.message.text or ''
-
-        # Проверяем: упоминание бота, reply на сообщение бота, или команда
-        mentioned = (
-            f'@{bot_username}' in text or
-            (update.message.reply_to_message and
-             update.message.reply_to_message.from_user.id == context.bot.id) or
-            text.startswith('/')
-        )
-
-        if not mentioned:
-            # Игнорируем сообщения без упоминания бота в группах
-            return
-
-        # Убираем упоминание бота из URL если есть
-        if f'@{bot_username}' in text:
-            url = text.replace(f'@{bot_username}', '').strip()
-
-    # Получаем имя пользователя для отображения
-    user = update.effective_user
-    if user.username:
-        user_name = f'@{user.username}'
-    else:
-        user_name = user.first_name or f'User_{user_id}'
-
-    # Проверка поддерживаемых URL
-    platform = detect_platform(url)
-    if not platform:
-        # В группах не отвечаем на неверные ссылки без упоминания
-        if chat_type in ['group', 'supergroup']:
-            return
-        await update.message.reply_text(
-            '❌ Неверная ссылка.\n\n'
-            'Поддерживаются:\n'
-            '• YouTube (youtube.com, youtu.be)\n'
-            '• Instagram (instagram.com/p, instagram.com/reel)\n\n'
-            'Пожалуйста, отправьте действительную ссылку.'
-        )
+    message = update.message
+    if not message or not update.effective_user:
         return
+    text = message.text or ''
+    url = text.strip()
+    if message.chat.type in ('group', 'supergroup'):
+        mention = f'@{context.bot.username}'
+        reply = message.reply_to_message
+        mentioned = mention.lower() in text.lower().split()
+        replies_to_bot = reply and reply.from_user and reply.from_user.id == context.bot.id
+        if not (mentioned or replies_to_bot):
+            return
+        if mentioned:
+            url = ' '.join(word for word in text.split() if word.lower() != mention.lower())
+    await _start_download(update, url)
 
-    # Проверка активной загрузки
-    if user_id in active_downloads:
-        await update.message.reply_text(
-            '⚠️ Вы уже скачиваете видео!\n'
-            'Дождитесь окончания текущей загрузки.'
-        )
-        return
 
-    # Создаём статусное сообщение
-    status_message = await update.message.reply_text('⏳ Добавлено в очередь...')
-
-    # Генерируем ID для этого скачивания
-    download_id = str(uuid.uuid4())[:8]
-
-    # Создаём задачу
-    task = DownloadTask(
-        user_id=user_id,
-        chat_id=update.message.chat_id,
-        message_id=update.message.message_id,
-        url=url,
-        status_message=status_message,
-        user_name=user_name,
-        download_id=download_id,
-    )
-
-    # Регистрируем активную загрузку
-    active_downloads[user_id] = {
-        'chat_id': update.message.chat_id,
-        'message_id': update.message.message_id,
-        'status': 'downloading',
-        'url': url,
-        'download_id': download_id,
-    }
-
-    # Запускаем фоновую задачу
-    bg_task = asyncio.create_task(process_download(task))
-    bg_task.add_done_callback(background_tasks.discard)
-    background_tasks.add(bg_task)
-
-    logger.info(f'[User {user_id}] Задача добавлена: {url}')
+async def _wait_for_downloads(application: Application) -> None:
+    """Let workers stop and clean their files before Telegram is shut down."""
+    cancelled_downloads.update(active_downloads)
+    if background_tasks:
+        await asyncio.gather(*list(background_tasks), return_exceptions=True)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1031,7 +639,7 @@ def main() -> None:
         )
 
     logger.info('Запуск бота...')
-    logger.info('Макс. одновременных скачиваний: 3')
+    logger.info('Макс. одновременных скачиваний: %s', MAX_CONCURRENT_DOWNLOADS)
 
     # Configure longer timeouts for file uploads
     request = HTTPXRequest(
@@ -1042,7 +650,10 @@ def main() -> None:
         media_write_timeout=60.0,
     )
 
-    application = Application.builder().token(BOT_TOKEN).request(request).build()
+    application = (
+        Application.builder().token(BOT_TOKEN).request(request)
+        .post_stop(_wait_for_downloads).build()
+    )
     application.add_error_handler(error_handler)
 
     application.add_handler(CommandHandler('start', start_command))

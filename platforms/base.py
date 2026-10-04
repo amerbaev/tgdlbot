@@ -3,9 +3,6 @@
 from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple
 import re
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class BasePlatform(ABC):
@@ -30,7 +27,9 @@ class BasePlatform(ABC):
         Returns:
             True если URL валиден для этой платформы
         """
-        return bool(re.match(self.url_pattern, url))
+        if re.search(r'[\s\x00-\x1f\x7f\\]', url):
+            return False
+        return bool(re.fullmatch(self.url_pattern, url))
 
     @abstractmethod
     def get_format_options(self, info: dict) -> List[Tuple[str, Optional[dict]]]:

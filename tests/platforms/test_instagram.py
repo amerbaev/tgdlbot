@@ -42,6 +42,19 @@ class TestInstagramPlatform:
         for url in invalid_urls:
             assert not platform.is_valid_url(url), f'{url} should be invalid'
 
+    @pytest.mark.parametrize('url', [
+        'https://instagram.com/p/?utm_source=share',
+        'https://instagram.com/reel/?utm_source=share',
+        'https://instagram.com/p/ABC123/extra',
+        'https://instagram.com/reel/ABC123/extra',
+        'https://instagram.com/p/ABC%2F123',
+        'https://instagram.com.evil.example/p/ABC123',
+        'https://instagram.com@evil.example/p/ABC123',
+        'https://user@instagram.com/p/ABC123',
+    ])
+    def test_rejects_invalid_post_urls(self, url):
+        assert not InstagramPlatform().is_valid_url(url)
+
     def test_get_format_options(self):
         """Test format options for Instagram."""
         platform = InstagramPlatform()

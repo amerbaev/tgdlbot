@@ -45,7 +45,7 @@ RUN apt-get update && \
 
 # Владельца задаём при копировании, не дублируя .venv слоем chown -R.
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
-COPY --chown=appuser:appuser bot.py config.py ./
+COPY --chown=appuser:appuser bot.py config.py media.py ./
 COPY --chown=appuser:appuser platforms ./platforms/
 
 USER appuser
@@ -58,7 +58,7 @@ FROM base AS test
 COPY --from=test-builder /app/.venv /app/.venv
 # pyproject.toml содержит настройки pytest, включая asyncio_mode.
 COPY pyproject.toml ./
-COPY bot.py config.py ./
+COPY bot.py config.py media.py ./
 COPY platforms ./platforms/
 COPY tests ./tests/
 

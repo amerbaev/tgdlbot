@@ -92,12 +92,24 @@ def test_missing_instagram_cookie_file_fails_before_network(tmp_path, monkeypatc
     assert 'missing.txt' in caplog.text
 
 
+def test_cookie_removed_after_analysis_is_a_download_failure(cookie_file, tmp_path, monkeypatch):
+    monkeypatch.setattr(bot, 'DOWNLOAD_DIR', str(tmp_path))
+
+    def extract_info(ydl, url, download=True, **kwargs):
+        assert not download, 'Missing cookies must fail before another network request'
+        cookie_file.unlink()
+        return {'id': 'test', 'title': 'reel', 'ext': 'mp4'}
+
+    monkeypatch.setattr(yt_dlp.YoutubeDL, 'extract_info', extract_info)
+    assert bot.download_video_sync(REEL_URL) is None
+
+
 @pytest.mark.asyncio
 async def test_instagram_failure_explains_access_and_cleans_up(monkeypatch):
     status = AsyncMock()
     task = bot.DownloadTask(98765, 123, 1, REEL_URL, status, '@tester')
     bot.active_downloads[task.user_id] = {'url': REEL_URL}
-    monkeypatch.setattr(bot, 'download_video_sync', lambda url: None)
+    monkeypatch.setattr(bot, 'download_video_sync', lambda *args: None)
 
     await bot.process_download(task)
 

@@ -1,6 +1,8 @@
 """YouTube platform handler."""
 
 from typing import List, Tuple, Optional
+import re
+from urllib.parse import parse_qs, urlsplit
 from .base import BasePlatform
 from config import MAX_FILE_SIZE
 
@@ -39,20 +41,23 @@ def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
 
         # Ищем формат с целевым разрешением (в пределах 10px)
         if height and abs(height - target_height) <= 10:
-            if filesize:
-                return filesize
+            if filesize is None:
+                return None
 
             # DASH формат: суммируем размеры видео + аудио
-            if fmt.get('acodec') == 'none' and filesize is None:
+            if fmt.get('acodec') == 'none':
                 audio_fmt = next(
                     (
                         f for f in formats
-                        if f.get('acodec') != 'none' and f.get('vcodec') == 'none'
+                        if f.get('acodec') not in (None, 'none') and f.get('vcodec') == 'none'
                     ),
                     None,
                 )
-                if audio_fmt and audio_fmt.get('filesize'):
-                    return fmt.get('filesize', 0) + audio_fmt.get('filesize', 0)
+                if audio_fmt is None or audio_fmt.get('filesize') is None:
+                    return None
+                return filesize + audio_fmt['filesize']
+
+            return filesize
 
     return None
 
@@ -112,7 +117,22 @@ class YouTubePlatform(BasePlatform):
 
     @property
     def url_pattern(self) -> str:
-        return r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/.+$'
+        return (
+            r'(?:https?://)?(?:www\.)?(?:'
+            r'youtube\.com/(?:watch|shorts/[A-Za-z0-9_-]+/?)|'
+            r'youtu\.be/[A-Za-z0-9_-]+/?)'
+            r'(?:\?[^#]*)?(?:#.*)?'
+        )
+
+    def is_valid_url(self, url: str) -> bool:
+        if not super().is_valid_url(url):
+            return False
+
+        parsed = urlsplit(url if url.startswith(('http://', 'https://')) else f'https://{url}')
+        if parsed.hostname in ('youtube.com', 'www.youtube.com') and parsed.path == '/watch':
+            video_ids = parse_qs(parsed.query, keep_blank_values=True).get('v', [])
+            return len(video_ids) == 1 and bool(re.fullmatch(r'[A-Za-z0-9_-]+', video_ids[0]))
+        return True
 
     def get_format_options(self, info: dict) -> List[Tuple[str, Optional[dict]]]:
         """Выбор лучшего формата от высокого к низкому качеству."""

@@ -23,7 +23,5 @@ services:
       context: .
       target: test  # Используем test stage
     container_name: tgdlbot-test
-    env_file:
-      - .env
     profiles:
       - test  # Только при явном вызове

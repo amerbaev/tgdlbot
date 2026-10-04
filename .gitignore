@@ -1,5 +1,7 @@
 # Environment
 .env
+.env.*
+!.env.example
 cookies/
 .venv
 venv/
@@ -28,6 +30,8 @@ Thumbs.db
 # FFmpeg (используется системный в Docker)
 ffmpeg.exe
 ffmpeg
+ffprobe.exe
+ffprobe
 
 # Claude
 .claude/
