@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from io import StringIO
 from typing import Any, Callable, Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
@@ -29,7 +29,7 @@ from config import (
     BOT_TOKEN, DOWNLOAD_DIR, INSTAGRAM_COOKIES_FILE, MAX_FILE_SIZE,
     MAX_CONCURRENT_DOWNLOADS, MAX_DOWNLOAD_SIZE,
 )
-from media import format_size, is_safe_path, split_video, _cleanup_parts
+from media import create_video_preview, format_size, is_safe_path, split_video, _cleanup_parts
 from platforms import BasePlatform, YouTubePlatform, InstagramPlatform
 
 
@@ -147,9 +147,25 @@ def _cleanup_download_files(download_id: str, keep: Optional[str] = None) -> Non
             for name in os.listdir(DOWNLOAD_DIR)
             if name.startswith(f'{download_id}_')
         ]
-        _cleanup_parts([path for path in paths if path != keep], base_dir=DOWNLOAD_DIR)
+        retained = {keep, f'{keep}.cover'} if keep else set()
+        _cleanup_parts([path for path in paths if path not in retained], base_dir=DOWNLOAD_DIR)
     except OSError as error:
         logger.warning('Не удалось очистить загрузку %s: %s', download_id, error)
+
+
+def _retain_source_cover(info: dict, video_path: str) -> None:
+    """Keep only this attempt's downloaded thumbnail beside the final video."""
+    stem = os.path.splitext(video_path)[0]
+    for thumbnail in reversed(info.get('thumbnails') or []):
+        path = thumbnail.get('filepath')
+        if (not path or not is_safe_path(path, DOWNLOAD_DIR)
+                or os.path.splitext(path)[0] != stem or path == video_path):
+            continue
+        try:
+            os.replace(path, f'{video_path}.cover')
+            return
+        except OSError as error:
+            logger.warning('Could not retain source cover: %s', error)
 
 
 def _try_download_format(
@@ -169,6 +185,7 @@ def _try_download_format(
             # Neither remote titles nor IDs influence the local filename.
             'outtmpl': os.path.join(DOWNLOAD_DIR, f'{download_id}_{attempt}.%(ext)s'),
             'merge_output_format': 'mp4',
+            'writethumbnail': True,
         })
         if extractor_args:
             options['extractor_args'] = extractor_args
@@ -182,6 +199,7 @@ def _try_download_format(
                 if is_safe_path(path, DOWNLOAD_DIR) and os.path.isfile(path):
                     size = os.path.getsize(path)
                     if 0 < size <= MAX_DOWNLOAD_SIZE:
+                        _retain_source_cover(info, path)
                         return path
     except yt_dlp.utils.DownloadCancelled:
         raise
@@ -297,9 +315,36 @@ async def _send_download_error(status_message: Any, platform_name: Optional[str]
     )
 
 
+async def _reply_video(
+    status_message: Any,
+    video_path: str,
+    cover_path: Optional[str] = None,
+) -> None:
+    """Attach a source cover or generated preview without blocking handlers."""
+    args = (video_path, cover_path) if cover_path else (video_path,)
+    worker = asyncio.create_task(asyncio.to_thread(create_video_preview, *args))
+    try:
+        preview = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Keep the source alive until ffmpeg exits, then let job cleanup run.
+        await worker
+        raise
+
+    attachments = {}
+    if preview:
+        # Telegram may ignore thumbnail on small videos; cover is explicit.
+        attachments = {
+            'thumbnail': InputFile(preview, filename='thumbnail.jpg'),
+            'cover': InputFile(preview, filename='cover.jpg'),
+        }
+    with open(video_path, 'rb') as video_file:
+        await status_message.reply_video(video=video_file, **attachments)
+
+
 async def _send_video_parts(
     status_message: Any,
     parts: list[str],
+    cover_path: Optional[str] = None,
 ) -> None:
     """Отправляет части видео пользователю.
 
@@ -309,8 +354,7 @@ async def _send_video_parts(
     """
     try:
         for i, part_path in enumerate(parts, 1):
-            with open(part_path, 'rb') as part_file:
-                await status_message.reply_video(video=part_file)
+            await _reply_video(status_message, part_path, cover_path)
             logger.info('Отправлена часть %s/%s', i, len(parts))
     finally:
         _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
@@ -352,7 +396,7 @@ async def _send_large_video(
     try:
         if task.user_id not in cancelled_downloads:
             await task.status_message.edit_text(f'📤 Отправляю {len(parts)} частей...')
-            await _send_video_parts(task.status_message, parts)
+            await _send_video_parts(task.status_message, parts, cover_path=f'{video_path}.cover')
         else:
             return False
     finally:
@@ -378,8 +422,7 @@ async def _send_single_video(
     """
     await task.status_message.edit_text('📤 Отправляю видео...')
 
-    with open(video_path, 'rb') as video_file:
-        await task.status_message.reply_video(video=video_file)
+    await _reply_video(task.status_message, video_path)
 
     await task.status_message.delete()
     logger.info(f'[User {task.user_id}] Видео отправлено')

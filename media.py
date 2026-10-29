@@ -1,4 +1,4 @@
-"""Video splitting and safe cleanup, independent of Telegram handlers."""
+"""Video previews, splitting and safe cleanup, independent of Telegram handlers."""
 
 import logging
 import math
@@ -14,6 +14,9 @@ MAX_RETRIES = 2
 RETRY_DURATION_MULTIPLIER = 0.8
 FFPROBE_TIMEOUT = 30
 FFMPEG_TIMEOUT = 300
+PREVIEW_TIMEOUT = 15
+PREVIEW_SCAN_SECONDS = 30
+MAX_PREVIEW_SIZE = 200 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,47 @@ def _cleanup_parts(parts: list[str], base_dir: str | None = None) -> None:
                 os.remove(part_path)
         except OSError as error:
             logger.warning('Could not remove %s: %s', part_path, error)
+
+
+def create_video_preview(video_path: str, cover_path: str | None = None) -> bytes | None:
+    """Prefer the downloaded cover; fall back to a non-black video frame.
+
+    Return a Telegram-compatible JPEG in memory so cancellation leaves no
+    temporary preview files. A missing or broken preview must not block upload.
+    """
+    if not is_safe_path(video_path):
+        return None
+    cover_path = cover_path or f'{video_path}.cover'
+    sources = []
+    if is_safe_path(cover_path) and os.path.isfile(cover_path):
+        sources.append((cover_path, False))
+    sources.append((video_path, True))
+
+    for source, is_video in sources:
+        filters = 'scale=320:320:force_original_aspect_ratio=decrease,setsar=1'
+        if is_video:
+            filters += (
+                ',blackframe=amount=0:threshold=32'
+                ',metadata=mode=select:key=lavfi.blackframe.pblack:value=98:function=less'
+            )
+        try:
+            result = subprocess.run(
+                [
+                    'ffmpeg', '-nostdin', '-v', 'error',
+                    '-t', str(PREVIEW_SCAN_SECONDS), '-i', source,
+                    '-map', '0:v:0', '-vf', filters, '-frames:v', '1',
+                    '-an', '-sn', '-c:v', 'mjpeg', '-q:v', '5',
+                    '-pix_fmt', 'yuvj420p', '-f', 'image2pipe', 'pipe:1',
+                ],
+                capture_output=True, check=True, timeout=PREVIEW_TIMEOUT,
+            )
+            preview = result.stdout
+            if (preview.startswith(b'\xff\xd8') and preview.endswith(b'\xff\xd9')
+                    and len(preview) < MAX_PREVIEW_SIZE):
+                return preview
+        except (OSError, subprocess.SubprocessError) as error:
+            logger.warning('Preview generation failed for %s: %s', source, error)
+    return None
 
 
 def _get_video_duration(video_path: str) -> float | None:
