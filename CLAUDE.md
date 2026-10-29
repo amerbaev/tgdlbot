@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Telegram bot for downloading YouTube and Instagram videos in best quality (1080p → 720p → 480p → 360p), automatically splitting files larger than 50MB into parts. Uses yt-dlp with mediaconnect client for high-quality downloads and ffmpeg for video splitting.
+Telegram bot for downloading YouTube and Instagram videos in best quality (1080p → 720p → 480p → 360p), automatically splitting files larger than 50MB into parts. Uses yt-dlp with its default YouTube clients, Deno/EJS for JavaScript challenges, and ffmpeg for video splitting.
 
 ## Development Commands
 
@@ -43,7 +43,7 @@ make clean      # Remove temporary files
 1. User sends YouTube URL → `handle_message()` validates and creates `DownloadTask`
 2. `asyncio.create_task(process_download())` starts background processing
 3. `download_video_sync()` tries formats from `FORMAT_CANDIDATES` (1080p → 720p → 480p → 360p)
-   - Uses mediaconnect client for 1080p/720p to bypass 403 errors
+   - Uses the default yt-dlp clients for both metadata and every download quality
    - Uses the same full UUID for admission, cancellation, download filenames, and cleanup
    - Reads the successful extraction result without fetching metadata again
    - Restricts input to individual supported video URLs; rejects live streams and playlists
@@ -69,7 +69,8 @@ make clean      # Remove temporary files
 
 ### Dependencies
 - `python-telegram-bot` - Telegram Bot API wrapper (async)
-- `yt-dlp` - YouTube downloader with mediaconnect support
+- `yt-dlp[curl-cffi,deno]` - Downloader with browser impersonation and the Deno runtime
+- `yt-dlp-ejs` - YouTube challenge scripts; keep its pin aligned with yt-dlp
 - `ffmpeg` (system) - Video splitting (installed in Docker, not bundled)
 
 ### Configuration

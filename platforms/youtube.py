@@ -9,8 +9,8 @@ from config import MAX_FILE_SIZE
 
 # Format priorities (height, extractor_args)
 FORMAT_CANDIDATES = [
-    (1080, {'youtube': {'player_client': 'mediaconnect'}}),
-    (720, {'youtube': {'player_client': 'mediaconnect'}}),
+    (1080, None),
+    (720, None),
     (480, {}),
     (360, {}),
 ]

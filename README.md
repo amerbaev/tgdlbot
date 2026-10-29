@@ -72,6 +72,18 @@ Telegram бот для скачивания видео с YouTube и Instagram.
    uv run python bot.py
    ```
 
+### YouTube: JavaScript runtime
+
+Deno устанавливается вместе с `yt-dlp[curl-cffi,deno]` через `uv sync` и входит
+в Docker-образ. Пакет `yt-dlp-ejs` содержит скрипты для JavaScript challenges.
+Без этих компонентов часть форматов YouTube может быть недоступна; это не
+означает отказ всех скачиваний. Используются стандартные клиенты yt-dlp.
+
+Версия `yt-dlp-ejs` закреплена по требованиям текущего yt-dlp. При обновлении
+yt-dlp проверьте совместимый pin и выполните `uv run pytest tests/ -v`.
+Подробнее — [инструкция yt-dlp по EJS](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+Предупреждения экстрактора видны в логах для обеих платформ.
+
 ### Instagram: ошибка `empty media response`
 
 Эта ошибка возникает при получении данных о публикации, до скачивания файла.

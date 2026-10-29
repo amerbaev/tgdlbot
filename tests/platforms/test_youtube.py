@@ -1,6 +1,8 @@
 """Tests for YouTube platform handler."""
 
 import pytest
+import yt_dlp
+from yt_dlp.extractor.youtube import YoutubeIE
 from platforms.youtube import (
     YouTubePlatform,
     select_best_format,
@@ -163,19 +165,25 @@ class TestSelectBestFormat:
         assert len(result) > 0
         assert all(isinstance(item, tuple) and len(item) == 2 for item in result)
 
-    def test_uses_mediaconnect(self):
-        """Test that mediaconnect client is used when size is known."""
+    @pytest.mark.parametrize('height', [1080, 720])
+    def test_high_quality_options_do_not_request_unsupported_clients(self, height, capsys):
+        """Exercise the actual extractor-argument parser, without network requests."""
         info = {
             'formats': [
-                {'format_id': '137', 'height': 1080, 'filesize': 20 * 1024 * 1024, 'vcodec': 'avc1'},
+                {'format_id': 'video', 'height': height, 'filesize': 20 * 1024 * 1024, 'vcodec': 'avc1'},
             ]
         }
 
-        result = select_best_format(info)
-
-        # First format should use mediaconnect
-        format_selector, extractor_args = result[0]
-        assert 'mediaconnect' in extractor_args.get('youtube', {}).get('player_client', '')
+        _, extractor_args = select_best_format(info)[0]
+        with yt_dlp.YoutubeDL({
+            'quiet': True, 'cachedir': False, 'js_runtimes': {},
+            'extractor_args': extractor_args or {},
+        }) as ydl:
+            extractor = YoutubeIE(ydl)
+            extractor.initialize()
+            clients = extractor._get_requested_clients('https://www.youtube.com/watch?v=test', {}, False)
+        assert clients
+        assert 'Skipping unsupported client' not in capsys.readouterr().err
 
     def test_skips_oversized_1080p(self):
         """Test that 1080p is skipped if too large."""

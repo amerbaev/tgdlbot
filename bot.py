@@ -99,7 +99,7 @@ def _get_ytdlp_options(url: str, cancelled: Optional[Callable[[], bool]] = None)
     """Общие настройки анализа и скачивания, включая сессию Instagram."""
     instagram = is_instagram_url(url)
     options = {
-        'quiet': True, 'no_warnings': not instagram,
+        'quiet': True, 'no_warnings': False,
         'noplaylist': True, 'playlistend': 1,
         'socket_timeout': 30, 'retries': 3, 'fragment_retries': 3,
         'max_filesize': MAX_DOWNLOAD_SIZE,
