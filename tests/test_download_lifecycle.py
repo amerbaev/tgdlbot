@@ -120,10 +120,18 @@ async def test_internal_exception_is_not_sent_to_user(monkeypatch):
     assert task.user_id not in bot.active_downloads
 
 
-def test_success_does_not_fetch_metadata_again(isolated_downloads, monkeypatch):
+@pytest.mark.parametrize('url', [
+    URL,
+    'https://www.youtube.com/shorts/test?si=shared',
+    'https://m.youtube.com/shorts/test',
+    'm.youtube.com/shorts/test/',
+])
+def test_success_does_not_fetch_metadata_again(isolated_downloads, monkeypatch, url):
     calls = []
+    expected_url = url if url.startswith('https://') else 'https://' + url
 
     def extract(ydl, url, download=True, **kwargs):
+        assert url == expected_url
         calls.append(download)
         if len(calls) > 2:
             raise yt_dlp.utils.DownloadError('metadata expired after successful download')
@@ -133,7 +141,7 @@ def test_success_does_not_fetch_metadata_again(isolated_downloads, monkeypatch):
         return info
 
     monkeypatch.setattr(yt_dlp.YoutubeDL, 'extract_info', extract)
-    result = bot.download_video_sync(URL)
+    result = bot.download_video_sync(url)
     assert result is not None
     assert Path(result).read_bytes() == b'video'
     assert calls == [False, True]

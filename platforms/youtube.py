@@ -19,11 +19,11 @@ SIZE_THRESHOLD = 1.5  # Multiplier for format size estimation
 
 
 def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
-    """Оценка размера формата по заданному качеству.
+    """Оценка размера формата по короткой стороне кадра.
 
     Args:
         info: Метаданные видео от yt-dlp
-        target_height: Желаемая высота видео
+        target_height: Желаемое качество (короткая сторона для вертикального видео)
 
     Returns:
         Оценочный размер в байтах или None если неизвестен
@@ -32,6 +32,8 @@ def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
 
     for fmt in formats:
         height = fmt.get('height')
+        width = fmt.get('width')
+        resolution = min(width, height) if width and height else height
         filesize = fmt.get('filesize')
         vcodec = fmt.get('vcodec', '')
 
@@ -40,7 +42,7 @@ def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
             continue
 
         # Ищем формат с целевым разрешением (в пределах 10px)
-        if height and abs(height - target_height) <= 10:
+        if resolution and abs(resolution - target_height) <= 10:
             if filesize is None:
                 return None
 
@@ -77,6 +79,12 @@ def select_best_format(info: dict) -> List[Tuple[str, Optional[dict]]]:
         Список кортежей (format_selector, extractor_args)
     """
     formats_to_try = []
+    # Shorts are usually portrait: 1080p is 1080x1920, so cap width.
+    portrait = any(
+        0 < (fmt.get('width') or 0) < (fmt.get('height') or 0)
+        for fmt in info.get('formats', []) if fmt.get('vcodec') != 'none'
+    )
+    dimension = 'width' if portrait else 'height'
 
     # Проверяем 1080p и 720p
     for target_height, extractor_args in FORMAT_CANDIDATES[:2]:  # 1080, 720
@@ -90,20 +98,24 @@ def select_best_format(info: dict) -> List[Tuple[str, Optional[dict]]]:
 
         # Размер известен и приемлем - добавляем
         format_selector = (
-            f'bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
-            f'bestvideo[height<={target_height}]+bestaudio'
+            f'bestvideo[{dimension}<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
+            f'bestvideo[{dimension}<={target_height}]+bestaudio'
         )
         formats_to_try.append((format_selector, extractor_args))
 
     # Всегда добавляем 480p (без extractor_args для совместимости)
     format_selector_480 = (
-        'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/'
-        'bestvideo[height<=480]+bestaudio'
+        f'bestvideo[{dimension}<=480][ext=mp4]+bestaudio[ext=m4a]/'
+        f'bestvideo[{dimension}<=480]+bestaudio'
     )
     formats_to_try.append((format_selector_480, None))
 
-    # Fallback на 360p (формат 18)
-    formats_to_try.append(('18', None))
+    # Shorts may offer 360p only as separate video and audio streams.
+    fallback = (
+        'bestvideo[width<=360][ext=mp4]+bestaudio[ext=m4a]/'
+        'bestvideo[width<=360]+bestaudio/18'
+    ) if portrait else '18'
+    formats_to_try.append((fallback, None))
 
     return formats_to_try
 
@@ -118,9 +130,9 @@ class YouTubePlatform(BasePlatform):
     @property
     def url_pattern(self) -> str:
         return (
-            r'(?:https?://)?(?:www\.)?(?:'
-            r'youtube\.com/(?:watch|shorts/[A-Za-z0-9_-]+/?)|'
-            r'youtu\.be/[A-Za-z0-9_-]+/?)'
+            r'(?:https?://)?(?:'
+            r'(?:www\.|m\.)?youtube\.com/(?:watch|shorts/[A-Za-z0-9_-]+/?)|'
+            r'(?:www\.)?youtu\.be/[A-Za-z0-9_-]+/?)'
             r'(?:\?[^#]*)?(?:#.*)?'
         )
 
@@ -129,7 +141,7 @@ class YouTubePlatform(BasePlatform):
             return False
 
         parsed = urlsplit(url if url.startswith(('http://', 'https://')) else f'https://{url}')
-        if parsed.hostname in ('youtube.com', 'www.youtube.com') and parsed.path == '/watch':
+        if parsed.hostname in ('youtube.com', 'www.youtube.com', 'm.youtube.com') and parsed.path == '/watch':
             video_ids = parse_qs(parsed.query, keep_blank_values=True).get('v', [])
             return len(video_ids) == 1 and bool(re.fullmatch(r'[A-Za-z0-9_-]+', video_ids[0]))
         return True
