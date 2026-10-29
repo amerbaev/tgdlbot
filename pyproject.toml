@@ -5,7 +5,7 @@ description = "Telegram bot for downloading YouTube videos"
 requires-python = ">=3.14"
 dependencies = [
     "python-telegram-bot>=22.8",
-    "yt-dlp[curl-cffi]>=2026.8.19",
+    "yt-dlp[curl-cffi]>=2026.10.26",
     "python-dotenv>=1.2.3",
 ]
 
@@ -15,6 +15,13 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-mock>=3.15.1",
     "pytest-cov>=7.1.0",
+]
+
+[tool.uv]
+# Keep the downloader transport and CA bundle on their security-fixed releases.
+constraint-dependencies = [
+    "curl-cffi>=0.17.0",
+    "certifi>=2026.10.23",
 ]
 
 [tool.pytest.ini_options]

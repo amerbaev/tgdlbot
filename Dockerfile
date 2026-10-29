@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Зависимости кешируются отдельно от исходного кода.
 FROM base AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
 
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
