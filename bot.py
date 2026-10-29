@@ -29,7 +29,10 @@ from config import (
     BOT_TOKEN, DOWNLOAD_DIR, INSTAGRAM_COOKIES_FILE, MAX_FILE_SIZE,
     MAX_CONCURRENT_DOWNLOADS, MAX_DOWNLOAD_SIZE,
 )
-from media import create_video_preview, format_size, is_safe_path, split_video, _cleanup_parts
+from media import (
+    create_video_preview, get_video_dimensions, format_size, is_safe_path,
+    split_video, _cleanup_parts,
+)
 from platforms import BasePlatform, YouTubePlatform, InstagramPlatform
 
 
@@ -320,13 +323,17 @@ async def _reply_video(
     video_path: str,
     cover_path: Optional[str] = None,
 ) -> None:
-    """Attach a source cover or generated preview without blocking handlers."""
+    """Send a preview and display dimensions without blocking handlers."""
     args = (video_path, cover_path) if cover_path else (video_path,)
-    worker = asyncio.create_task(asyncio.to_thread(create_video_preview, *args))
+
+    def prepare_upload():
+        return create_video_preview(*args), get_video_dimensions(video_path)
+
+    worker = asyncio.create_task(asyncio.to_thread(prepare_upload))
     try:
-        preview = await asyncio.shield(worker)
+        preview, dimensions = await asyncio.shield(worker)
     except asyncio.CancelledError:
-        # Keep the source alive until ffmpeg exits, then let job cleanup run.
+        # Keep the source alive until ffmpeg/ffprobe exit, then clean up.
         await worker
         raise
 
@@ -338,7 +345,7 @@ async def _reply_video(
             'cover': InputFile(preview, filename='cover.jpg'),
         }
     with open(video_path, 'rb') as video_file:
-        await status_message.reply_video(video=video_file, **attachments)
+        await status_message.reply_video(video=video_file, **dimensions, **attachments)
 
 
 async def _send_video_parts(

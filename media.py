@@ -1,9 +1,11 @@
 """Video previews, splitting and safe cleanup, independent of Telegram handlers."""
 
+import json
 import logging
 import math
 import os
 import subprocess
+from fractions import Fraction
 
 from config import DOWNLOAD_DIR, MAX_FILE_SIZE
 
@@ -88,6 +90,55 @@ def create_video_preview(video_path: str, cover_path: str | None = None) -> byte
         except (OSError, subprocess.SubprocessError) as error:
             logger.warning('Preview generation failed for %s: %s', source, error)
     return None
+
+
+def get_video_dimensions(video_path: str) -> dict[str, int]:
+    """Read display dimensions for Telegram, including pixel shape and rotation."""
+    if not is_safe_path(video_path):
+        return {}
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error', '-select_streams', 'V:0',
+                '-show_entries',
+                'stream=width,height,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation',
+                '-of', 'json', video_path,
+            ],
+            capture_output=True, text=True, check=True, timeout=FFPROBE_TIMEOUT,
+        )
+        info = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        logger.warning('Could not read video dimensions for %s: %s', video_path, error)
+        return {}
+
+    streams = info.get('streams') if isinstance(info, dict) else None
+    if not isinstance(streams, list) or not streams or not isinstance(streams[0], dict):
+        return {}
+    stream = streams[0]
+    width, height = stream.get('width'), stream.get('height')
+    if any(type(value) is not int or value <= 0 for value in (width, height)):
+        return {}
+
+    # Telegram dimensions describe square display pixels, not encoded samples.
+    try:
+        sar = Fraction(str(stream.get('sample_aspect_ratio', '1:1')).replace(':', '/'))
+        if sar > 0:
+            width = max(1, round(width * sar))
+    except (ValueError, ZeroDivisionError):
+        pass  # An absent/unknown sample aspect ratio means square pixels.
+
+    tags = stream.get('tags') or {}
+    rotation = tags.get('rotate', 0) if isinstance(tags, dict) else 0
+    for side_data in stream.get('side_data_list') or []:
+        if isinstance(side_data, dict) and 'rotation' in side_data:
+            rotation = side_data['rotation']
+            break
+    try:
+        if math.isclose(float(rotation) % 180, 90, abs_tol=0.01):
+            width, height = height, width
+    except (TypeError, ValueError):
+        pass
+    return {'width': width, 'height': height}
 
 
 def _get_video_duration(video_path: str) -> float | None:
