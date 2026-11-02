@@ -39,7 +39,7 @@ def test_retry_preserves_every_interval_including_tail(download_dir, monkeypatch
         attempts += 1
         start = float(command[command.index('-ss') + 1])
         duration = float(command[command.index('-t') + 1])
-        write_file(command[-1], (55 if attempts == 1 else 40) * MB)
+        write_file(command[-1], (80 if attempts == 1 else 40) * MB)
         intervals[command[-1]] = (start, duration)
         return subprocess.CompletedProcess(command, 0, b'', b'')
 
@@ -48,7 +48,7 @@ def test_retry_preserves_every_interval_including_tail(download_dir, monkeypatch
     parts = media.split_video(str(source))
 
     assert [intervals[part] for part in parts] == [
-        (0, 80), (80, 100), (180, 100), (280, 20),
+        (0, 50), (50, 100), (150, 100), (250, 50),
     ]
     assert all(Path(part).stat().st_size <= 50 * MB for part in parts)
 
