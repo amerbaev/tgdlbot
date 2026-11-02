@@ -34,7 +34,10 @@ FROM base AS production
 LABEL maintainer="tgdlbot"
 LABEL description="Telegram YouTube Downloader Bot"
 
-RUN apt-get update && \
+# Installation happens in builder; omit pip's vendored libraries from runtime.
+RUN /usr/local/bin/python -m pip uninstall --yes pip && \
+    rm -rf /usr/local/lib/python3.14/ensurepip && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         ca-certificates \
