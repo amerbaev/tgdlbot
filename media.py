@@ -186,13 +186,20 @@ def _create_video_part(
     start_time: float,
     part_duration: float,
 ) -> bool:
-    """Copy one interval with ffmpeg, removing incomplete output on failure."""
+    """Encode one exact interval, removing incomplete output on failure."""
     try:
         subprocess.run(
             [
-                'ffmpeg', '-i', video_path,
-                '-ss', str(start_time), '-t', str(part_duration),
-                '-c', 'copy', '-y', output_path,
+                # Accurate input seeking decodes from the preceding keyframe.
+                # Stream copy would skip to the next keyframe and lose frames.
+                'ffmpeg', '-nostdin', '-ss', str(start_time), '-i', video_path,
+                '-t', str(part_duration),
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+                # Keep timestamp precision: rounding to 1/fps can include a
+                # boundary frame in both this part and the next one.
+                '-fps_mode', 'passthrough', '-enc_time_base:v', 'demux',
+                '-c:a', 'aac',
+                '-movflags', '+faststart', '-y', output_path,
             ],
             capture_output=True,
             check=True,
@@ -235,7 +242,9 @@ def _split_part_with_retry(
             logger.warning('Part %s exceeds size limit: %s', part_index, format_size(actual_size))
             _cleanup_parts([output_path])
             if attempt < MAX_RETRIES - 1:
-                part_duration *= RETRY_DURATION_MULTIPLIER
+                # Re-encoding can increase bitrate substantially. Scale to the
+                # measured size, with a 20% margin for bitrate variation.
+                part_duration *= RETRY_DURATION_MULTIPLIER * MAX_FILE_SIZE / actual_size
         return None
     finally:
         if not accepted:
