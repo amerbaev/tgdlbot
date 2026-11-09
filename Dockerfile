@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 # Зависимости кешируются отдельно от исходного кода.
 FROM base AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
@@ -35,12 +35,14 @@ LABEL maintainer="tgdlbot"
 LABEL description="Telegram YouTube Downloader Bot"
 
 # Installation happens in builder; omit pip's vendored libraries from runtime.
+# Refresh zlib1g explicitly: the base image can lag Debian security updates.
 RUN /usr/local/bin/python -m pip uninstall --yes pip && \
     rm -rf /usr/local/lib/python3.14/ensurepip && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         ca-certificates \
+        zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     && useradd -m -u 1000 appuser \
