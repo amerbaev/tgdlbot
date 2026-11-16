@@ -16,7 +16,7 @@ uses GHCR by default and an explicit overlay keeps local development available.
 ## Global Constraints
 
 - Publish only on `master`, using `GITHUB_TOKEN` and `packages: write`.
-- Build both `production` and `test` for `linux/amd64`.
+- Build both `production` and `test` for `linux/amd64` and `linux/arm64`.
 - Tests run offline without bot credentials; production runs as its existing user.
 - Publish tested images without rebuilding them; use full commit SHA tags.
 - Do not change the application, dependencies, or deployment configuration.
@@ -69,3 +69,27 @@ master/PR/manual event rules, using `packages: write` only in `publish`.
 
 Delivery verification: run the workflow in a pull request to verify archive
 export/load and transfer, both matrices, and skipped publication for pull requests.
+
+## Fix: Raspberry Pi 5 support (2026-11-17)
+
+The registry manifest identified the published image as amd64. The user runs
+Raspberry Pi 5 (ARM); the Python executable fails before the application starts.
+The Python and uv base images and locked native dependencies support ARM64.
+
+- [x] Configure both targets on native amd64 and ARM64 runners with isolated caches,
+  artifact paths, and Docker tags; test each image on its own architecture.
+- [x] Add a runtime architecture/Python startup check, then run the existing
+  offline and FFmpeg suites for each architecture.
+- [x] Assemble multi-platform indexes from the tested archives in publish;
+  verify both platforms before updating latest/master/test aliases.
+- [x] Update README with automatic platform selection, 64-bit Raspberry Pi OS,
+  and recovery commands for the previous amd64-only image.
+
+Verification: actionlint, native amd64 startup check locally, and the full
+GitHub Actions matrix including native ARM64 builds and tests. The multi-platform
+registry aliases become available after the fix is merged and published.
+
+Local checks: actionlint and diff check pass. The current image passes amd64
+startup validation and fails the ARM64 predicate as expected. Buildx dry-run
+assembly of two existing platform manifests passes the publication guard;
+the same guard rejects an amd64-only index. Independent review found no issues.
