@@ -4,9 +4,10 @@
 
 **Goal:** Build, test, and publish both Docker targets when master changes.
 
-**Architecture:** One GitHub Actions job builds and tests the existing images,
-then authenticates and pushes the tested images only on master. PRs run the
-same build and tests without registry authentication or publication.
+**Architecture:** Separate build and test matrix jobs pass Docker archives as
+artifacts. A publish job pushes the tested images only on master. PRs run the
+same build and tests without registry authentication or publication. Compose
+uses GHCR by default and an explicit overlay keeps local development available.
 
 **Tech Stack:** GitHub Actions, Docker Buildx, GHCR, actionlint.
 
@@ -52,3 +53,19 @@ the managed environment's temporary CA secret mounts. The offline test image
 passes 228 tests (11 FFmpeg tests skipped, three existing dependency warnings).
 Production unittest discovery passes all 11 FFmpeg tests, including the preview
 and dimension suites added to CI after review.
+
+## Follow-up: Separate CI jobs and use GHCR in Compose
+
+Requested after the initial PR was merged. Preserve the existing tags and
+master/PR/manual event rules, using `packages: write` only in `publish`.
+
+- [x] Split build/test/publish; transfer the original Docker archives using
+  uniquely named artifacts retained for three days, without rebuilding.
+- [x] Switch both Compose services to GHCR with configurable tags and always-pull;
+  add an explicit local-build overlay and update Makefile, README, and AGENTS.md.
+- [x] Check actionlint, default/pinned/local Compose configurations and Makefile
+  commands. Run the published test image through Compose: 228 passed,
+  11 FFmpeg skips, three existing dependency warnings.
+
+Delivery verification: run the workflow in a pull request to verify archive
+export/load and transfer, both matrices, and skipped publication for pull requests.

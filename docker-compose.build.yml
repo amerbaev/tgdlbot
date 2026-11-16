@@ -1,0 +1,16 @@
+# Явное дополнение для локальной разработки:
+# docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  tgdlbot:
+    image: tgdlbot:production
+    pull_policy: never
+    build:
+      context: .
+      target: production
+
+  test:
+    image: tgdlbot:test
+    pull_policy: never
+    build:
+      context: .
+      target: test
