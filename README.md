@@ -171,6 +171,49 @@ BuildKit cache mount и не попадает в итоговые образы.
 образы запускают Python из `/app/.venv` напрямую. Production содержит ffmpeg
 и работает от `appuser` (UID 1000), а test дополнительно содержит dev-зависимости.
 
+### Автоматическая сборка и GHCR
+
+Workflow [Container images](https://github.com/amerbaev/tgdlbot/actions/workflows/images.yml)
+собирает оба Docker-образа для `linux/amd64` при каждом push в `master`.
+Перед публикацией он запускает тестовый контейнер без сети и отдельно проверяет
+нарезку, превью и размеры видео с реальным FFmpeg в production-образе. Ошибка сборки или тестов
+останавливает публикацию. В pull request в `master` выполняются те же проверки.
+Ручной запуск доступен через **Actions → Container images → Run workflow**;
+публикация выполняется только при выборе ветки `master`.
+
+Образы публикуются в `ghcr.io/amerbaev/tgdlbot`:
+
+| Образ | Обновляемые теги | Тег конкретного коммита |
+|-------|-----------------|------------------------|
+| Production | `latest`, `master` | `sha-<полный SHA>` |
+| Test | `test` | `test-sha-<полный SHA>` |
+
+```bash
+docker pull ghcr.io/amerbaev/tgdlbot:latest
+docker run -d --name tgdlbot --restart unless-stopped \
+  --env-file .env \
+  -v "$PWD/downloads:/app/downloads" \
+  -v "$PWD/cookies:/app/cookies:ro" \
+  ghcr.io/amerbaev/tgdlbot:latest
+
+# Тестовый образ запускается без токена и сети:
+docker pull ghcr.io/amerbaev/tgdlbot:test
+docker run --rm --network none ghcr.io/amerbaev/tgdlbot:test
+```
+
+Для воспроизводимого запуска замените `latest` на `sha-<полный SHA>`.
+Каталог `downloads/` должен быть доступен для записи UID 1000, а cookies — для
+чтения. Существующий Docker Compose по-прежнему собирает образы локально.
+
+Дополнительные secrets для CI не нужны: workflow использует встроенный
+`GITHUB_TOKEN` с правом `packages: write`. В репозитории должны быть разрешены
+GitHub Actions и публикация Packages. Если пакет с этим именем уже существует,
+дайте репозиторию доступ в настройках пакета **Manage Actions access**.
+Новый пакет GHCR по умолчанию приватный: для скачивания без авторизации после
+первой публикации переключите его видимость на **Public** в настройках пакета.
+Для приватного пакета сначала выполните `docker login ghcr.io`, используя
+personal access token (classic) с правом `read:packages`.
+
 ## Использование
 
 1. Отправьте `/start` для приветствия
