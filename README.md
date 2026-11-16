@@ -46,8 +46,13 @@ Telegram бот для скачивания видео с YouTube и Instagram.
 
 4. **Запустите бота**
    ```bash
+   mkdir -p downloads cookies
    docker compose up -d
    ```
+   Compose скачает готовый production-образ из GHCR (`latest`, `linux/amd64`).
+   Локальная сборка не требуется. Каталог `downloads/` должен быть доступен для
+   записи UID 1000. Если пакет приватный, сначала выполните
+   [вход в GHCR](#автоматическая-сборка-и-ghcr).
 
 5. **Проверьте логи**
    ```bash
@@ -58,6 +63,11 @@ Telegram бот для скачивания видео с YouTube и Instagram.
    ```bash
    docker compose down
    ```
+
+Для обновления до свежего образа из `master` снова выполните `docker compose up -d`
+(или `make up`): `pull_policy: always` проверит обновления и Compose пересоздаст
+контейнер, если образ изменился. Команда `docker compose restart` образ не обновляет.
+Для запуска конкретного коммита задайте в `.env` `TGDLBOT_IMAGE_TAG=sha-<полный SHA>`.
 
 ### Локальный запуск
 
@@ -93,10 +103,10 @@ yt-dlp проверьте совместимый pin и выполните `uv r
 Даже публичные Reels иногда недоступны анонимно.
 
 В зависимости включён `yt-dlp[curl-cffi]`: обработчик Instagram использует
-`curl-cffi` для имитации браузера. После обновления кода пересоберите контейнер:
+`curl-cffi` для имитации браузера. После публикации нового образа обновите контейнер:
 
 ```bash
-docker compose up -d --build tgdlbot
+docker compose up -d tgdlbot
 ```
 
 Если ошибка остаётся, подключите сессию Instagram:
@@ -115,7 +125,7 @@ docker compose up -d --build tgdlbot
    INSTAGRAM_COOKIES_FILE=/app/cookies/instagram.txt
    ```
    Для локального запуска используйте `INSTAGRAM_COOKIES_FILE=cookies/instagram.txt`.
-4. Пересоздайте контейнер командой `docker compose up -d --build tgdlbot`.
+4. Пересоздайте контейнер командой `docker compose up -d --force-recreate tgdlbot`.
    Обычный `restart` не применяет изменения переменных окружения.
 
 Cookies применяются только к Instagram, при анализе и скачивании. Каталог `cookies/`
@@ -140,6 +150,7 @@ Cookies не гарантируют доступ к удалённому рол�
 В production-образе их можно выполнить без установки pytest:
 
 ```bash
+make build
 docker run --rm --network none -v "$PWD/tests:/app/tests:ro" tgdlbot:production \
   python -m unittest tests.test_video_split_ffmpeg -v
 ```
@@ -150,11 +161,30 @@ docker run --rm --network none -v "$PWD/tests:/app/tests:ro" tgdlbot:production 
 # Локально
 uv run pytest tests/ -v
 
-# В Docker (отдельный test-образ)
-docker compose --profile test run --build --rm test
+# В Docker из текущего локального кода
+make test-docker
+
+# Готовый test-образ из GHCR (без сети и токена)
+docker compose --profile test run --rm test
 ```
 
 ### Сборка Docker-образов
+
+Для разработки локальная сборка вынесена в явное дополнение
+`docker-compose.build.yml`. Оно задаёт локальные теги и отключает скачивание
+образов из реестра:
+
+```bash
+make build       # tgdlbot:production
+make build-test  # tgdlbot:test
+make up-local    # Собрать текущий код и запустить бота
+make test-docker # Собрать текущий код и запустить тесты
+
+# Эквивалент make up-local:
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build tgdlbot
+```
+
+Без дополнения `docker compose up` всегда использует GHCR. Прямая сборка также доступна:
 
 ```bash
 docker build --target production -t tgdlbot:production .
@@ -175,9 +205,16 @@ BuildKit cache mount и не попадает в итоговые образы.
 
 Workflow [Container images](https://github.com/amerbaev/tgdlbot/actions/workflows/images.yml)
 собирает оба Docker-образа для `linux/amd64` при каждом push в `master`.
-Перед публикацией он запускает тестовый контейнер без сети и отдельно проверяет
-нарезку, превью и размеры видео с реальным FFmpeg в production-образе. Ошибка сборки или тестов
-останавливает публикацию. В pull request в `master` выполняются те же проверки.
+В нём три последовательных jobs: `build → test → publish`. Сборка и тесты
+выполняются параллельно для `production` и `test`. Образы передаются между jobs
+через artifacts, поэтому публикуются те же образы, которые прошли проверки,
+без повторной сборки. Artifacts хранятся три дня; для повторного запуска позже
+нужно заново выполнить сборку.
+
+Job `test` запускает тестовый контейнер без сети и отдельно проверяет нарезку,
+превью и размеры видео с реальным FFmpeg в production-образе. Ошибка любой сборки
+или проверки останавливает публикацию. Право `packages: write` есть только у
+job `publish`. В pull request в `master` выполняются сборка и проверки.
 Ручной запуск доступен через **Actions → Container images → Run workflow**;
 публикация выполняется только при выборе ветки `master`.
 
@@ -202,8 +239,11 @@ docker run --rm --network none ghcr.io/amerbaev/tgdlbot:test
 ```
 
 Для воспроизводимого запуска замените `latest` на `sha-<полный SHA>`.
+В Compose те же теги задаются через `.env`: `TGDLBOT_IMAGE_TAG=sha-<полный SHA>`
+и `TGDLBOT_TEST_IMAGE_TAG=test-sha-<полный SHA>`. По умолчанию используются
+`latest` и `test` соответственно.
 Каталог `downloads/` должен быть доступен для записи UID 1000, а cookies — для
-чтения. Существующий Docker Compose по-прежнему собирает образы локально.
+чтения.
 
 Дополнительные secrets для CI не нужны: workflow использует встроенный
 `GITHUB_TOKEN` с правом `packages: write`. В репозитории должны быть разрешены
@@ -256,6 +296,7 @@ tgdlbot/
 ├── .env.example        # Пример переменных окружения
 ├── Dockerfile          # Docker образ
 ├── docker-compose.yml  # Docker Compose конфигурация
+├── docker-compose.build.yml # Локальная сборка для разработки
 ├── pyproject.toml      # Зависимости проекта
 └── README.md           # Этот файл
 ```

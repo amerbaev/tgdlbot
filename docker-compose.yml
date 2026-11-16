@@ -1,9 +1,8 @@
 services:
   # Production сервис
   tgdlbot:
-    build:
-      context: .
-      target: production  # Используем production stage
+    image: ghcr.io/amerbaev/tgdlbot:${TGDLBOT_IMAGE_TAG:-latest}
+    pull_policy: always
     container_name: tgdlbot
     restart: unless-stopped
     env_file:
@@ -19,9 +18,9 @@ services:
 
   # Test сервис (для запуска тестов)
   test:
-    build:
-      context: .
-      target: test  # Используем test stage
+    image: ghcr.io/amerbaev/tgdlbot:${TGDLBOT_TEST_IMAGE_TAG:-test}
+    pull_policy: always
+    network_mode: none
     container_name: tgdlbot-test
     profiles:
       - test  # Только при явном вызове

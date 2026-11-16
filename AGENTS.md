@@ -22,8 +22,9 @@ uv run pytest tests/ -v -k test_name  # Single test
 make test
 
 # Docker
-make build      # Build production image
-make up         # Start bot
+make build      # Build local production image
+make up         # Pull GHCR production image and start bot
+make up-local   # Build and start bot from local source
 make logs       # View logs
 make down       # Stop services
 
