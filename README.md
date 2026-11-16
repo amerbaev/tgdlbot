@@ -49,7 +49,8 @@ Telegram бот для скачивания видео с YouTube и Instagram.
    mkdir -p downloads cookies
    docker compose up -d
    ```
-   Compose скачает готовый production-образ из GHCR (`latest`, `linux/amd64`).
+   Compose скачает готовый production-образ из GHCR (`latest`) для архитектуры
+   сервера: `linux/amd64` или `linux/arm64` (в том числе Raspberry Pi 5 с 64-битной ОС).
    Локальная сборка не требуется. Каталог `downloads/` должен быть доступен для
    записи UID 1000. Если пакет приватный, сначала выполните
    [вход в GHCR](#автоматическая-сборка-и-ghcr).
@@ -204,9 +205,10 @@ BuildKit cache mount и не попадает в итоговые образы.
 ### Автоматическая сборка и GHCR
 
 Workflow [Container images](https://github.com/amerbaev/tgdlbot/actions/workflows/images.yml)
-собирает оба Docker-образа для `linux/amd64` при каждом push в `master`.
+собирает оба Docker-образа для `linux/amd64` и `linux/arm64` при каждом push в `master`.
 В нём три последовательных jobs: `build → test → publish`. Сборка и тесты
-выполняются параллельно для `production` и `test`. Образы передаются между jobs
+выполняются параллельно для `production` и `test` на нативных amd64- и ARM64-runners.
+Перед тестами проверяются архитектура образа и запуск Python. Образы передаются между jobs
 через artifacts, поэтому публикуются те же образы, которые прошли проверки,
 без повторной сборки. Artifacts хранятся три дня; для повторного запуска позже
 нужно заново выполнить сборку.
@@ -242,8 +244,23 @@ docker run --rm --network none ghcr.io/amerbaev/tgdlbot:test
 В Compose те же теги задаются через `.env`: `TGDLBOT_IMAGE_TAG=sha-<полный SHA>`
 и `TGDLBOT_TEST_IMAGE_TAG=test-sha-<полный SHA>`. По умолчанию используются
 `latest` и `test` соответственно.
+Все эти теги содержат варианты `linux/amd64` и `linux/arm64`; Docker автоматически
+выбирает подходящий. Для Raspberry Pi нужна 64-битная ОС (`uname -m` → `aarch64`).
+Не задавайте `platform: linux/amd64` или `DOCKER_DEFAULT_PLATFORM=linux/amd64` на ARM.
 Каталог `downloads/` должен быть доступен для записи UID 1000, а cookies — для
 чтения.
+
+Если старый amd64-образ на Raspberry Pi завершается с `exec format error`, после
+публикации образа с поддержкой ARM64 обновите контейнер:
+
+```bash
+docker compose pull tgdlbot
+docker compose up -d --force-recreate tgdlbot
+```
+
+Если в `.env` закреплён старый SHA-тег, замените его на новый или на `latest`.
+До публикации нового образа можно использовать `make up-local` на самой Raspberry:
+локальная сборка выберет её архитектуру.
 
 Дополнительные secrets для CI не нужны: workflow использует встроенный
 `GITHUB_TOKEN` с правом `packages: write`. В репозитории должны быть разрешены
