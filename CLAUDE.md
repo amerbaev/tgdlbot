@@ -49,7 +49,9 @@ make clean      # Remove temporary files
    - Restricts input to individual supported video URLs; rejects live streams and playlists
 4. If file > 50MB: `media.split_video()` divides into parts with retry mechanism
    - Target size = 45MB (90% of limit)
-   - On oversize: retry with 80% duration (max 2 attempts)
+   - On oversize: shorten using measured encoded size (2 attempts, plus one correction for adaptive intervals)
+   - After a size retry, estimate later intervals from encoded bitrate toward 45MB, capped at the original duration; balance the final intervals to avoid a tiny tail
+   - If adaptive intervals exhaust size retries, clean that pass and retry the original splitting strategy once
    - Validates each part ≤ 50MB before adding to list
    - Advances by the accepted duration after a retry so no interval is skipped
    - Bounds ffprobe/ffmpeg execution and cleans partial outputs on failure

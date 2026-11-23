@@ -212,6 +212,10 @@ def _create_video_part(
         return False
 
 
+class _PartSizeLimitExceeded(Exception):
+    """Every encoded attempt exceeded the upload limit."""
+
+
 def _split_part_with_retry(
     video_path: str,
     output_path: str,
@@ -219,12 +223,13 @@ def _split_part_with_retry(
     initial_duration: float,
     part_index: int,
     total_parts: int,
+    max_attempts: int = MAX_RETRIES,
 ) -> tuple[str, float] | None:
     """Return a part and its accepted duration, shortening oversized attempts."""
     part_duration = initial_duration
     accepted = False
     try:
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(max_attempts):
             if not _create_video_part(video_path, output_path, start_time, part_duration):
                 return None
             actual_size = os.path.getsize(output_path)
@@ -241,11 +246,11 @@ def _split_part_with_retry(
 
             logger.warning('Part %s exceeds size limit: %s', part_index, format_size(actual_size))
             _cleanup_parts([output_path])
-            if attempt < MAX_RETRIES - 1:
+            if attempt < max_attempts - 1:
                 # Re-encoding can increase bitrate substantially. Scale to the
                 # measured size, with a 20% margin for bitrate variation.
                 part_duration *= RETRY_DURATION_MULTIPLIER * MAX_FILE_SIZE / actual_size
-        return None
+        raise _PartSizeLimitExceeded
     finally:
         if not accepted:
             _cleanup_parts([output_path])
@@ -253,6 +258,16 @@ def _split_part_with_retry(
 
 def split_video(video_path: str) -> list[str]:
     """Split the entire video into files within Telegram's size limit."""
+    try:
+        return _split_video(video_path, use_encoded_bitrate=True)
+    except _PartSizeLimitExceeded:
+        # Different boundaries can expose bitrate spikes. The failed pass has
+        # already cleaned its parts; retry the original strategy from the start.
+        logger.info('Adaptive intervals exceeded the size limit; retrying original intervals')
+        return _split_video(video_path, use_encoded_bitrate=False)
+
+
+def _split_video(video_path: str, *, use_encoded_bitrate: bool) -> list[str]:
     if not is_safe_path(video_path):
         logger.error('Unsafe video path: %s', video_path)
         return []
@@ -260,11 +275,13 @@ def split_video(video_path: str) -> list[str]:
     attempted_outputs: list[str] = []
     output_files: list[str] = []
     completed = False
+    used_adaptive_interval = False
     try:
         duration = _get_video_duration(video_path)
         if duration is None:
             return []
         num_parts, part_duration = _calculate_parts(os.path.getsize(video_path), duration)
+        initial_part_duration = part_duration
         stem, _ = os.path.splitext(video_path)
         cursor = 0.0
 
@@ -284,21 +301,43 @@ def split_video(video_path: str) -> list[str]:
                 if math.isclose(remaining, part_duration, rel_tol=1e-12, abs_tol=1e-9)
                 else min(part_duration, remaining)
             )
+            adaptive = use_encoded_bitrate and part_duration < initial_part_duration
+            used_adaptive_interval = used_adaptive_interval or adaptive
+            if adaptive and part_duration < remaining < 2 * part_duration:
+                # Balance the last two intervals instead of leaving a tail
+                # shorter than one video frame after an estimated boundary.
+                current_duration = remaining / 2
             result = _split_part_with_retry(
                 video_path, output_path, cursor,
                 current_duration, part_index, num_parts,
+                # A short bitrate spike can dominate the shortened retry.
+                # Allow one extra correction when using an adaptive estimate.
+                max_attempts=MAX_RETRIES + int(adaptive),
             )
             if result is None:
                 return []
 
             part_path, accepted_duration = result
             output_files.append(part_path)
+            if use_encoded_bitrate and (accepted_duration < current_duration or adaptive):
+                # Once re-encoding outgrows the source bitrate, use the measured
+                # output to avoid encoding the same oversized interval again.
+                # Let quieter scenes grow back up to the original estimate.
+                target_size = MAX_FILE_SIZE * (TARGET_SIZE_MB / 50.0)
+                part_duration = min(
+                    initial_part_duration,
+                    accepted_duration * target_size / os.path.getsize(part_path),
+                )
             # A retry may shorten a part. Advance by what was actually accepted
             # so the next part begins exactly where this one ends.
             cursor = min(duration, cursor + accepted_duration)
 
         completed = True
         return output_files
+    except _PartSizeLimitExceeded:
+        if used_adaptive_interval:
+            raise
+        return []
     except Exception as error:
         logger.error('Video splitting failed: %s', error)
         return []

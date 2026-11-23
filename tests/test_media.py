@@ -47,10 +47,51 @@ def test_retry_preserves_every_interval_including_tail(download_dir, monkeypatch
 
     parts = media.split_video(str(source))
 
-    assert [intervals[part] for part in parts] == [
-        (0, 50), (50, 100), (150, 100), (250, 50),
-    ]
+    accepted = [intervals[part] for part in parts]
+    assert accepted[0] == (0, 50)
+    for (start, duration), (next_start, _) in zip(accepted, accepted[1:]):
+        assert start + duration == pytest.approx(next_start)
+    assert sum(accepted[-1]) == pytest.approx(300)
     assert all(Path(part).stat().st_size <= 50 * MB for part in parts)
+
+
+@pytest.mark.parametrize('later_bitrate', [1, 0.25, 2], ids=['steady', 'falls', 'rises'])
+def test_split_learns_encoded_bitrate_after_retry(download_dir, monkeypatch, later_bitrate):
+    source = download_dir / 'video.mp4'
+    write_file(source, 100 * MB)
+    intervals = {}
+    oversized = []
+
+    def run(command, **kwargs):
+        if command[0] == 'ffprobe':
+            return subprocess.CompletedProcess(command, 0, '300', '')
+        start = float(command[command.index('-ss') + 1])
+        duration = float(command[command.index('-t') + 1])
+        # Source bitrate underestimates the re-encoded video. After the first
+        # accepted interval, scene complexity can stay steady, fall or rise.
+        bitrate = 1 if start < 40 else later_bitrate
+        size = int(duration * bitrate * MB)
+        write_file(command[-1], size)
+        if size > 50 * MB:
+            oversized.append(start)
+        else:
+            intervals[command[-1]] = (start, duration)
+        return subprocess.CompletedProcess(command, 0, b'', b'')
+
+    monkeypatch.setattr(media.subprocess, 'run', run)
+    parts = media.split_video(str(source))
+
+    assert parts
+    accepted = [intervals[part] for part in parts]
+    assert accepted[0] == (0, 40)
+    assert len(oversized) == (2 if later_bitrate == 2 else 1)
+    for (start, duration), (next_start, _) in zip(accepted, accepted[1:]):
+        assert start + duration == pytest.approx(next_start)
+    assert sum(accepted[-1]) == pytest.approx(300)
+    assert all(0 < duration <= 100 for _, duration in accepted)
+    assert all(0 < Path(part).stat().st_size <= 50 * MB for part in parts)
+    if later_bitrate == 0.25:
+        assert any(duration == 100 for _, duration in accepted[1:])
 
 
 def test_fractional_durations_do_not_create_near_zero_tail(download_dir, monkeypatch):
@@ -75,6 +116,35 @@ def test_fractional_durations_do_not_create_near_zero_tail(download_dir, monkeyp
     assert len(parts) == 7
     assert all(part_duration > 42 for _, part_duration in intervals)
     assert intervals[-1][0] + intervals[-1][1] == 300
+
+
+def test_adaptive_split_recovers_from_short_bitrate_spike(download_dir, monkeypatch):
+    source = download_dir / 'video.mp4'
+    write_file(source, 100 * MB)
+    intervals = {}
+
+    def run(command, **kwargs):
+        if command[0] == 'ffprobe':
+            return subprocess.CompletedProcess(command, 0, '300', '')
+        start = float(command[command.index('-ss') + 1])
+        duration = float(command[command.index('-t') + 1])
+        # 1 MiB/s normally, doubled only between 130 and 155 seconds. A short
+        # retry can contain a larger proportion of this burst than its parent.
+        overlap = max(0, min(start + duration, 155) - max(start, 130))
+        write_file(command[-1], int((duration + overlap) * MB))
+        intervals[command[-1]] = (start, duration)
+        return subprocess.CompletedProcess(command, 0, b'', b'')
+
+    monkeypatch.setattr(media.subprocess, 'run', run)
+    parts = media.split_video(str(source))
+
+    assert parts, 'A bitrate spike must not discard the whole video'
+    accepted = [intervals[part] for part in parts]
+    assert accepted[0][0] == 0
+    for (start, duration), (next_start, _) in zip(accepted, accepted[1:]):
+        assert start + duration == pytest.approx(next_start)
+    assert sum(accepted[-1]) == pytest.approx(300)
+    assert all(0 < Path(part).stat().st_size <= 50 * MB for part in parts)
 
 
 def test_empty_output_is_rejected_and_removed(download_dir, monkeypatch):
@@ -267,3 +337,36 @@ def test_cleanup_respects_explicit_base_directory(tmp_path):
 
     assert not removable.exists()
     assert outside.exists()
+
+
+def test_adaptive_split_falls_back_when_bursts_exhaust_size_retries(download_dir, monkeypatch):
+    source = download_dir / 'video.mp4'
+    write_file(source, 100 * MB)
+    intervals = {}
+
+    def run(command, **kwargs):
+        if command[0] == 'ffprobe':
+            return subprocess.CompletedProcess(command, 0, '300', '')
+        start = float(command[command.index('-ss') + 1])
+        duration = float(command[command.index('-t') + 1])
+        # These bursts succeed with the original boundaries, but an adaptive
+        # boundary falls just before the first burst and exhausts its attempts.
+        first = max(0, min(start + duration, 60) - max(start, 50))
+        second = max(0, min(start + duration, 130) - max(start, 120))
+        size = int((duration + 4 * first + second) * MB)
+        write_file(command[-1], size)
+        intervals[command[-1]] = (start, duration)
+        return subprocess.CompletedProcess(command, 0, b'', b'')
+
+    monkeypatch.setattr(media.subprocess, 'run', run)
+    parts = media.split_video(str(source))
+
+    assert parts, 'Failed estimates must fall back to the original splitting strategy'
+    accepted = [intervals[part] for part in parts]
+    assert accepted[0][0] == 0
+    for (start, duration), (next_start, _) in zip(accepted, accepted[1:]):
+        assert start + duration == pytest.approx(next_start)
+    assert sum(accepted[-1]) == pytest.approx(300)
+    assert all(0 < Path(part).stat().st_size <= 50 * MB for part in parts)
+    assert set(download_dir.iterdir()) == {source, *map(Path, parts)}
+    assert source.stat().st_size == 100 * MB

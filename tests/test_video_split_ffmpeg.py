@@ -126,10 +126,24 @@ class VideoSplitFFmpegTests(unittest.TestCase):
             )
             original = source.read_bytes()
             limit = source.stat().st_size * 2 // 3
+            oversized = []
+            create_part = media._create_video_part
+
+            def encode(*args):
+                success = create_part(*args)
+                if success and Path(args[1]).stat().st_size > limit:
+                    oversized.append(args[2])
+                return success
+
             with patch.object(media, 'DOWNLOAD_DIR', directory), \
-                    patch.object(media, 'MAX_FILE_SIZE', limit):
+                    patch.object(media, 'MAX_FILE_SIZE', limit), \
+                    patch.object(media, '_create_video_part', side_effect=encode):
                 parts = media.split_video(str(source))
             self.assertGreater(len(parts), 2)
+            self.assertLess(
+                len(oversized), len(parts) - 1,
+                'Reuse output estimates instead of retrying every full part',
+            )
             self.assertTrue(all(0 < Path(part).stat().st_size <= limit for part in parts))
             self.assertEqual(sum(self.frame_count(part) for part in parts), 125)
             self.assertEqual(source.read_bytes(), original)
@@ -147,6 +161,33 @@ class VideoSplitFFmpegTests(unittest.TestCase):
                     [frame for part in parts for frame in self.frame_ids(part)],
                     list(range(125)),
                 )
+
+    def test_adaptive_duration_does_not_leave_a_part_after_the_last_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.mp4'
+            self.make_numbered_video(source, codec='libx264', gop=250, bframes=3, audio=True)
+            getsize = media.os.path.getsize
+            limit = media.MAX_FILE_SIZE
+
+            def size(path):
+                # Force the first retry to accept 2.4 seconds, then estimate the
+                # next interval at 2.59 seconds: an unsafe 0.01-second tail.
+                if str(path).endswith('_part1.mp4'):
+                    if self.frame_count(path) > 60:
+                        return limit + 1
+                    return round(limit * 0.9 * 2.4 / 2.59)
+                return getsize(path)
+
+            with patch.object(media, 'DOWNLOAD_DIR', directory), \
+                    patch.object(media, '_calculate_parts', return_value=(2, 3.0)), \
+                    patch.object(media.os.path, 'getsize', side_effect=size):
+                parts = media.split_video(str(source))
+            self.assertTrue(parts)
+            self.assertEqual(
+                [frame for part in parts for frame in self.frame_ids(part)], list(range(125)),
+            )
+            for part in parts:
+                self.assertTrue(self.frame_ids(part), 'Every part needs decodable video')
 
     def test_size_retry_keeps_all_frames_including_short_tail(self):
         with tempfile.TemporaryDirectory() as directory:
