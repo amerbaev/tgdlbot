@@ -35,13 +35,18 @@ LABEL maintainer="tgdlbot"
 LABEL description="Telegram YouTube Downloader Bot"
 
 # Installation happens in builder; omit pip's vendored libraries from runtime.
-# Refresh zlib1g explicitly: the base image can lag Debian security updates.
+# Refresh runtime libraries explicitly: the base image can lag Debian updates.
 RUN /usr/local/bin/python -m pip uninstall --yes pip && \
     rm -rf /usr/local/lib/python3.14/ensurepip && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         ca-certificates \
+        libc-bin \
+        libc6 \
+        libssl3t64 \
+        openssl \
+        openssl-provider-legacy \
         zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
