@@ -63,12 +63,9 @@ class DownloadTask:
     """Информация о задаче на скачивание."""
 
     user_id: int
-    chat_id: int
-    message_id: int
     url: str
     status_message: Any
     user_name: str
-    video_path: Optional[str] = None
     download_id: Optional[str] = None
 
 
@@ -348,64 +345,37 @@ async def _reply_video(
         await status_message.reply_video(video=video_file, **dimensions, **attachments)
 
 
-async def _send_video_parts(
-    status_message: Any,
-    parts: list[str],
-    cover_path: Optional[str] = None,
-) -> None:
-    """Отправляет части видео пользователю.
-
-    Args:
-        status_message: Статусное сообщение
-        parts: Список путей к частям
-    """
-    try:
-        for i, part_path in enumerate(parts, 1):
-            await _reply_video(status_message, part_path, cover_path)
-            logger.info('Отправлена часть %s/%s', i, len(parts))
-    finally:
-        _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
-
-
 async def _send_large_video(
     task: DownloadTask,
     video_path: str,
-) -> bool:
-    """Отправляет большое видео по частям.
-
-    Args:
-        task: Задача скачивания
-        video_path: Путь к видео
-
-    Returns:
-        True если успешно, иначе False
-    """
+) -> None:
+    """Split and send a video, owning its parts until cleanup completes."""
     await task.status_message.edit_text(
         f'🔄 Видео большое ({format_size(os.path.getsize(video_path))}).\n'
-        f'Разбиваю на части...'
+        'Разбиваю на части...'
     )
 
+    parts = []
     worker = asyncio.create_task(asyncio.to_thread(split_video, video_path))
     try:
-        parts = await asyncio.shield(worker)
-    except asyncio.CancelledError:
-        cancelled_downloads.add(task.user_id)
-        parts = await worker
-        _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
-        raise
+        try:
+            parts = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # Wait for the writer before the finally block removes its outputs.
+            cancelled_downloads.add(task.user_id)
+            parts = await worker
+            raise
 
-    if not parts:
-        await task.status_message.edit_text(
-            '❌ Не удалось разбить видео'
-        )
-        return False
+        if not parts:
+            await task.status_message.edit_text('❌ Не удалось разбить видео')
+            return
+        if task.user_id in cancelled_downloads:
+            return
 
-    try:
-        if task.user_id not in cancelled_downloads:
-            await task.status_message.edit_text(f'📤 Отправляю {len(parts)} частей...')
-            await _send_video_parts(task.status_message, parts, cover_path=f'{video_path}.cover')
-        else:
-            return False
+        await task.status_message.edit_text(f'📤 Отправляю {len(parts)} частей...')
+        for index, part_path in enumerate(parts, 1):
+            await _reply_video(task.status_message, part_path, cover_path=f'{video_path}.cover')
+            logger.info('Отправлена часть %s/%s', index, len(parts))
     finally:
         _cleanup_parts(parts, base_dir=DOWNLOAD_DIR)
 
@@ -413,8 +383,6 @@ async def _send_large_video(
         f'✅ {task.user_name}, видео отправлено {len(parts)} частями!'
     )
     logger.info(f'[User {task.user_id}] Видео отправлено {len(parts)} частями')
-
-    return True
 
 
 async def _send_single_video(
@@ -435,23 +403,6 @@ async def _send_single_video(
     logger.info(f'[User {task.user_id}] Видео отправлено')
 
 
-async def _process_download_success(task: DownloadTask, video_path: str) -> None:
-    """Обрабатывает успешное скачивание.
-
-    Args:
-        task: Задача скачивания
-        video_path: Путь к скачанному видео
-    """
-    file_size = os.path.getsize(video_path)
-
-    if file_size > MAX_FILE_SIZE:
-        success = await _send_large_video(task, video_path)
-        if not success:
-            return
-    else:
-        await _send_single_video(task, video_path)
-
-
 async def process_download(task: DownloadTask) -> None:
     """Асинхронная обработка скачивания видео.
 
@@ -461,7 +412,6 @@ async def process_download(task: DownloadTask) -> None:
     user_id = task.user_id
     url = task.url
     video_path: Optional[str] = None
-    user_mention = task.user_name
     task.download_id = task.download_id or uuid.uuid4().hex
 
     try:
@@ -477,7 +427,7 @@ async def process_download(task: DownloadTask) -> None:
 
         await task.status_message.edit_text(
             f'⏳ Скачиваю видео...\n\n'
-            f'👤 {user_mention}\n'
+            f'👤 {task.user_name}\n'
             f'📎 {url[:50]}...',
             reply_markup=keyboard
         )
@@ -495,7 +445,6 @@ async def process_download(task: DownloadTask) -> None:
             cancelled_downloads.add(user_id)
             video_path = await worker
             raise
-        task.video_path = video_path
 
         # Проверяем отмену после скачивания
         if user_id in cancelled_downloads:
@@ -509,7 +458,10 @@ async def process_download(task: DownloadTask) -> None:
             await _send_download_error(task.status_message, detect_platform(url))
             return
 
-        await _process_download_success(task, video_path)
+        if os.path.getsize(video_path) > MAX_FILE_SIZE:
+            await _send_large_video(task, video_path)
+        else:
+            await _send_single_video(task, video_path)
 
     except Exception:
         logger.exception('[User %s] Ошибка обработки', user_id)
@@ -612,8 +564,10 @@ async def _start_download(update: Update, url: str) -> None:
     try:
         status = await message.reply_text('⏳ Добавлено в очередь...')
         task = DownloadTask(
-            user_id, message.chat_id, message.message_id, url, status,
-            f'@{user.username}' if user.username else user.first_name or f'User_{user_id}',
+            user_id=user_id,
+            url=url,
+            status_message=status,
+            user_name=f'@{user.username}' if user.username else user.first_name or f'User_{user_id}',
             download_id=download_id,
         )
         bg_task = asyncio.create_task(process_download(task))

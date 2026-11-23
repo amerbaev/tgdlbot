@@ -42,7 +42,7 @@ make clean      # Remove temporary files
 ### Download Flow
 1. User sends YouTube URL → `handle_message()` validates and creates `DownloadTask`
 2. `asyncio.create_task(process_download())` starts background processing
-3. `download_video_sync()` tries formats from `FORMAT_CANDIDATES` (1080p → 720p → 480p → 360p)
+3. `download_video_sync()` tries the platform's format options (1080p → 720p → 480p → 360p for YouTube)
    - Uses the default yt-dlp clients for both metadata and every download quality
    - Uses the same full UUID for admission, cancellation, download filenames, and cleanup
    - Reads the successful extraction result without fetching metadata again
@@ -53,6 +53,7 @@ make clean      # Remove temporary files
    - Validates each part ≤ 50MB before adding to list
    - Advances by the accepted duration after a retry so no interval is skipped
    - Bounds ffprobe/ffmpeg execution and cleans partial outputs on failure
+   - `_send_large_video()` owns completed parts through upload and cleanup, waiting for split/preview workers before removing their files on cancellation
 5. `cleanup_download()` releases the user slot and deletes only that job's files, including partial attempts
 
 ### Smart Format Selection
@@ -63,7 +64,7 @@ make clean      # Remove temporary files
 
 ### Key Components
 - `active_downloads: dict[int, dict]` - Tracks per-user download state (prevents duplicates)
-- `DownloadTask` dataclass - Carries user_id, chat_id, url, status_message, video_path
+- `DownloadTask` dataclass - Carries user_id, url, status_message, user_name, download_id; the downloaded path stays local to `process_download()`
 - `format_size()` - Utility for MB conversion
 - `cleanup_download()` - Centralized resource cleanup
 

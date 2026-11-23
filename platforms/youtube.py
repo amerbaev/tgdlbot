@@ -7,14 +7,6 @@ from .base import BasePlatform
 from config import MAX_FILE_SIZE
 
 
-# Format priorities (height, extractor_args)
-FORMAT_CANDIDATES = [
-    (1080, None),
-    (720, None),
-    (480, {}),
-    (360, {}),
-]
-
 SIZE_THRESHOLD = 1.5  # Multiplier for format size estimation
 
 
@@ -64,6 +56,14 @@ def estimate_format_size(info: dict, target_height: int) -> Optional[int]:
     return None
 
 
+def _video_audio_selector(dimension: str, resolution: int) -> str:
+    """Prefer MP4/M4A, then allow other codecs at the same quality limit."""
+    return (
+        f'bestvideo[{dimension}<={resolution}][ext=mp4]+bestaudio[ext=m4a]/'
+        f'bestvideo[{dimension}<={resolution}]+bestaudio'
+    )
+
+
 def select_best_format(info: dict) -> List[Tuple[str, Optional[dict]]]:
     """Выбор лучшего формата от высокого к низкому качеству.
 
@@ -86,35 +86,17 @@ def select_best_format(info: dict) -> List[Tuple[str, Optional[dict]]]:
     )
     dimension = 'width' if portrait else 'height'
 
-    # Проверяем 1080p и 720p
-    for target_height, extractor_args in FORMAT_CANDIDATES[:2]:  # 1080, 720
-        estimated = estimate_format_size(info, target_height)
-
-        # Пропускаем если:
-        # 1. Размер неизвестн (не можем оценить)
-        # 2. Размер слишком большой
+    # High qualities require a known video + audio size within the budget.
+    for resolution in (1080, 720):
+        estimated = estimate_format_size(info, resolution)
         if estimated is None or estimated > MAX_FILE_SIZE * SIZE_THRESHOLD:
             continue
+        formats_to_try.append((_video_audio_selector(dimension, resolution), None))
 
-        # Размер известен и приемлем - добавляем
-        format_selector = (
-            f'bestvideo[{dimension}<={target_height}][ext=mp4]+bestaudio[ext=m4a]/'
-            f'bestvideo[{dimension}<={target_height}]+bestaudio'
-        )
-        formats_to_try.append((format_selector, extractor_args))
-
-    # Всегда добавляем 480p (без extractor_args для совместимости)
-    format_selector_480 = (
-        f'bestvideo[{dimension}<=480][ext=mp4]+bestaudio[ext=m4a]/'
-        f'bestvideo[{dimension}<=480]+bestaudio'
-    )
-    formats_to_try.append((format_selector_480, None))
+    formats_to_try.append((_video_audio_selector(dimension, 480), None))
 
     # Shorts may offer 360p only as separate video and audio streams.
-    fallback = (
-        'bestvideo[width<=360][ext=mp4]+bestaudio[ext=m4a]/'
-        'bestvideo[width<=360]+bestaudio/18'
-    ) if portrait else '18'
+    fallback = f'{_video_audio_selector("width", 360)}/18' if portrait else '18'
     formats_to_try.append((fallback, None))
 
     return formats_to_try

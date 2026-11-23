@@ -66,3 +66,29 @@ def test_portrait_360_fallback_does_not_require_format_18(shorts_info):
     selector, _ = select_best_format(shorts_info)[-1]
 
     assert selected_video(shorts_info, selector)['format_id'] == '360'
+
+
+@pytest.mark.parametrize('portrait', [True, False])
+@pytest.mark.parametrize('extra_bytes,expected', [(0, '1080'), (1, '720')])
+def test_high_quality_size_threshold(shorts_info, portrait, extra_bytes, expected):
+    for fmt in shorts_info['formats'][1:]:
+        if fmt['format_id'] == '1080':
+            # 74 MiB of video plus the fixture's 1 MiB of audio reaches 75 MiB.
+            fmt['filesize'] = 74 * 1024 * 1024 + extra_bytes
+        if not portrait:
+            fmt['width'], fmt['height'] = fmt['height'], fmt['width']
+
+    selector, _ = select_best_format(shorts_info)[0]
+    assert selected_video(shorts_info, selector)['format_id'] == expected
+
+
+def test_portrait_fallback_can_use_progressive_format_18(shorts_info):
+    shorts_info['formats'] = [{
+        'format_id': '18', 'url': 'https://example.invalid/video.mp4',
+        'ext': 'mp4', 'width': 360, 'height': 640,
+        'vcodec': 'avc1', 'acodec': 'mp4a', 'filesize': 1024 * 1024,
+    }]
+    selector, _ = select_best_format(shorts_info)[-1]
+    with yt_dlp.YoutubeDL({'quiet': True, 'format': selector}) as ydl:
+        result = ydl.process_ie_result(deepcopy(shorts_info), download=False)
+    assert result['format_id'] == '18'

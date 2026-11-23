@@ -25,10 +25,8 @@ from bot import (
     cleanup_download,
     _get_platform_handler,
     _send_download_error,
-    _send_video_parts,
     _send_single_video,
     _send_large_video,
-    _process_download_success,
 )
 from config import MAX_FILE_SIZE, DOWNLOAD_DIR
 from media import _calculate_parts, _cleanup_parts, _get_video_duration
@@ -459,8 +457,6 @@ class TestHandleMessage:
         # Create task
         task = DownloadTask(
             user_id=user_id,
-            chat_id=chat_id,
-            message_id=1,
             url=url,
             status_message=status_message,
             user_name='@testuser',
@@ -502,8 +498,6 @@ class TestHandleMessage:
 
         task = DownloadTask(
             user_id=user_id,
-            chat_id=chat_id,
-            message_id=1,
             url=url,
             status_message=status_message,
             user_name='@testuser',
@@ -550,8 +544,6 @@ class TestHandleMessage:
 
         task = DownloadTask(
             user_id=user_id,
-            chat_id=chat_id,
-            message_id=1,
             url=url,
             status_message=status_message,
             user_name='@testuser',
@@ -573,29 +565,6 @@ class TestHandleMessage:
 
         # Verify user is removed from active_downloads by finally block
         assert user_id not in active_downloads
-
-
-class TestDownloadTask:
-    """Tests for DownloadTask dataclass."""
-
-    def test_creation(self):
-        """Test DownloadTask creation."""
-        test_url = 'https://example.com/watch?v=test'
-        task = DownloadTask(
-            user_id=123,
-            chat_id=456,
-            message_id=1,
-            url=test_url,
-            status_message=AsyncMock(),
-            user_name='@testuser',
-        )
-
-        assert task.user_id == 123
-        assert task.chat_id == 456
-        assert task.url == test_url
-        assert task.video_path is None
-        assert task.user_name == '@testuser'
-        assert task.download_id is None
 
 
 class TestConfig:
@@ -740,28 +709,6 @@ class TestSendDownloadError:
         assert 'Возможные причины' in call_args
 
 
-class TestSendVideoParts:
-    @pytest.mark.asyncio
-    async def test_sends_all_parts_and_removes_files(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        directory = tmp_path / 'downloads'
-        directory.mkdir()
-        paths = [directory / 'part1.mp4', directory / 'part2.mp4']
-        for path, content in zip(paths, (b'first', b'second')):
-            path.write_bytes(content)
-        received = []
-
-        async def send(**kwargs):
-            received.append(kwargs['video'].read())
-            assert 'caption' not in kwargs
-
-        status = AsyncMock()
-        status.reply_video.side_effect = send
-        await _send_video_parts(status, [str(path) for path in paths])
-        assert received == [b'first', b'second']
-        assert not any(path.exists() for path in paths)
-
-
 class TestSendSingleVideo:
     """Tests for _send_single_video function."""
 
@@ -776,8 +723,6 @@ class TestSendSingleVideo:
 
         task = DownloadTask(
             user_id=123,
-            chat_id=456,
-            message_id=1,
             url='https://youtube.com/watch?v=test',
             status_message=mock_status,
             user_name='@testuser',
@@ -801,8 +746,6 @@ class TestSendSingleVideo:
 
         task = DownloadTask(
             user_id=123,
-            chat_id=456,
-            message_id=1,
             url='https://youtube.com/watch?v=test',
             status_message=mock_status,
             user_name='@testuser',
@@ -830,18 +773,16 @@ class TestSendLargeVideo:
 
         task = DownloadTask(
             user_id=123,
-            chat_id=456,
-            message_id=1,
             url='https://youtube.com/watch?v=test',
             status_message=mock_status,
             user_name='@testuser',
         )
 
-        with patch('bot._send_video_parts'):
-            result = await _send_large_video(task, 'test.mp4')
+        with patch('bot._reply_video') as reply_video:
+            await _send_large_video(task, 'test.mp4')
 
-        assert result is True
-        mock_status.edit_text.assert_called()
+        assert reply_video.await_count == 2
+        assert 'отправлено 2 частями' in mock_status.edit_text.call_args.args[0]
 
     @pytest.mark.asyncio
     @patch('bot.split_video')
@@ -855,84 +796,12 @@ class TestSendLargeVideo:
 
         task = DownloadTask(
             user_id=123,
-            chat_id=456,
-            message_id=1,
             url='https://youtube.com/watch?v=test',
             status_message=mock_status,
             user_name='@testuser',
         )
 
-        result = await _send_large_video(task, 'test.mp4')
+        await _send_large_video(task, 'test.mp4')
 
-        assert result is False
+        assert 'Не удалось разбить видео' in mock_status.edit_text.call_args.args[0]
         mock_cleanup.assert_not_called()  # released once by process_download.finally
-
-
-class TestProcessDownloadSuccess:
-    """Tests for _process_download_success function."""
-
-    @pytest.mark.asyncio
-    @patch('bot._send_single_video')
-    @patch('os.path.getsize')
-    async def test_small_video(self, mock_getsize, mock_send):
-        """Test processing small video."""
-        mock_getsize.return_value = 10 * 1024 * 1024
-        mock_status = AsyncMock()
-
-        task = DownloadTask(
-            user_id=123,
-            chat_id=456,
-            message_id=1,
-            url='https://youtube.com/watch?v=test',
-            status_message=mock_status,
-            user_name='@testuser',
-        )
-
-        await _process_download_success(task, 'test.mp4')
-
-        mock_send.assert_called_once_with(task, 'test.mp4')
-
-    @pytest.mark.asyncio
-    @patch('bot._send_large_video')
-    @patch('os.path.getsize')
-    async def test_large_video(self, mock_getsize, mock_send):
-        """Test processing large video."""
-        mock_getsize.return_value = 100 * 1024 * 1024
-        mock_send.return_value = True
-        mock_status = AsyncMock()
-
-        task = DownloadTask(
-            user_id=123,
-            chat_id=456,
-            message_id=1,
-            url='https://youtube.com/watch?v=test',
-            status_message=mock_status,
-            user_name='@testuser',
-        )
-
-        await _process_download_success(task, 'test.mp4')
-
-        mock_send.assert_called_once_with(task, 'test.mp4')
-
-    @pytest.mark.asyncio
-    @patch('bot._send_large_video')
-    @patch('os.path.getsize')
-    async def test_large_video_failure(self, mock_getsize, mock_send):
-        """Test handling large video send failure."""
-        mock_getsize.return_value = 100 * 1024 * 1024
-        mock_send.return_value = False
-        mock_status = AsyncMock()
-
-        task = DownloadTask(
-            user_id=123,
-            chat_id=456,
-            message_id=1,
-            url='https://youtube.com/watch?v=test',
-            status_message=mock_status,
-            user_name='@testuser',
-        )
-
-        await _process_download_success(task, 'test.mp4')
-
-        # Original file and user slot belong to process_download.finally
-        mock_send.assert_called_once()
