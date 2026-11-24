@@ -107,7 +107,7 @@ def test_cookie_removed_after_analysis_is_a_download_failure(cookie_file, tmp_pa
 @pytest.mark.asyncio
 async def test_instagram_failure_explains_access_and_cleans_up(monkeypatch):
     status = AsyncMock()
-    task = bot.DownloadTask(98765, 123, 1, REEL_URL, status, '@tester')
+    task = bot.DownloadTask(user_id=98765, url=REEL_URL, status_message=status, user_name='@tester')
     bot.active_downloads[task.user_id] = {'url': REEL_URL}
     monkeypatch.setattr(bot, 'download_video_sync', lambda *args: None)
 

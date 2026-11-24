@@ -37,7 +37,10 @@ def make_update(user_id=123):
 
 
 def make_task():
-    return bot.DownloadTask(123, 456, 1, URL, AsyncMock(), '@tester', download_id='job123')
+    return bot.DownloadTask(
+        user_id=123, url=URL, status_message=AsyncMock(),
+        user_name='@tester', download_id='job123',
+    )
 
 
 @pytest.mark.asyncio
@@ -99,15 +102,19 @@ async def test_stale_or_foreign_cancel_does_not_change_active_download(data, act
 
 
 @pytest.mark.asyncio
-async def test_parts_are_removed_when_upload_fails(isolated_downloads):
+async def test_parts_are_removed_when_upload_fails(isolated_downloads, monkeypatch):
     paths = [isolated_downloads / f'job_part{i}.mp4' for i in range(3)]
     for path in paths:
         path.write_bytes(b'video')
-    status = AsyncMock()
-    status.reply_video.side_effect = RuntimeError('upload failed')
+    source = isolated_downloads / 'job.mp4'
+    source.write_bytes(b'source')
+    monkeypatch.setattr(bot, 'split_video', lambda *args: list(map(str, paths)))
+    task = make_task()
+    task.status_message.reply_video.side_effect = RuntimeError('upload failed')
     with pytest.raises(RuntimeError):
-        await bot._send_video_parts(status, list(map(str, paths)))
+        await bot._send_large_video(task, str(source))
     assert not any(path.exists() for path in paths)
+    assert source.exists(), 'the original file belongs to process_download'
 
 
 @pytest.mark.asyncio
@@ -276,3 +283,81 @@ async def test_status_failure_after_split_cleans_parts(isolated_downloads, monke
     with pytest.raises(RuntimeError):
         await bot._send_large_video(task, str(source))
     assert not part.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('size,expected_uploads', [(10, [b'wholevideo']), (11, [b'first', b'second'])])
+async def test_download_delivery_at_upload_limit(isolated_downloads, monkeypatch, size, expected_uploads):
+    task = make_task()
+    source = isolated_downloads / 'job123_1.mp4'
+    source.write_bytes(b'wholevideo' + b'x' * (size - 10))
+    unrelated = isolated_downloads / 'otherjob_1.mp4'
+    unrelated.write_bytes(b'keep')
+    monkeypatch.setattr(bot, 'MAX_FILE_SIZE', 10)
+    monkeypatch.setattr(bot, 'download_video_sync', lambda *args: str(source))
+    monkeypatch.setattr(bot, 'create_video_preview', lambda *args: None)
+    monkeypatch.setattr(bot, 'get_video_dimensions', lambda *args: {})
+
+    def split(path):
+        assert size > 10, 'a video at the upload limit must be sent whole'
+        assert path == str(source)
+        parts = [isolated_downloads / f'job123_1_part{i}.mp4' for i in (1, 2)]
+        for part, content in zip(parts, (b'first', b'second')):
+            part.write_bytes(content)
+        return list(map(str, parts))
+
+    monkeypatch.setattr(bot, 'split_video', split)
+    received = []
+
+    async def upload(**kwargs):
+        assert 'caption' not in kwargs
+        received.append(kwargs['video'].read())
+
+    task.status_message.reply_video.side_effect = upload
+    bot.active_downloads[task.user_id] = {'download_id': task.download_id}
+    await bot.process_download(task)
+
+    assert received == expected_uploads
+    assert list(isolated_downloads.iterdir()) == [unrelated]
+    assert task.user_id not in bot.active_downloads
+    if size <= 10:
+        task.status_message.delete.assert_awaited_once()
+    else:
+        assert 'отправлено 2 частями' in task.status_message.edit_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['split-failed', 'upload-failed', 'cancelled'])
+async def test_unsuccessful_split_delivery_cleans_job(isolated_downloads, monkeypatch, outcome):
+    task = make_task()
+    source = isolated_downloads / 'job123_1.mp4'
+    source.write_bytes(b'large video')
+    parts = [isolated_downloads / f'job123_1_part{i}.mp4' for i in (1, 2)]
+    monkeypatch.setattr(bot, 'MAX_FILE_SIZE', 10)
+    monkeypatch.setattr(bot, 'download_video_sync', lambda *args: str(source))
+    monkeypatch.setattr(bot, 'create_video_preview', lambda *args: None)
+    monkeypatch.setattr(bot, 'get_video_dimensions', lambda *args: {})
+
+    def split(path):
+        if outcome == 'split-failed':
+            return []
+        for part in parts:
+            part.write_bytes(b'part')
+        if outcome == 'cancelled':
+            bot.cancelled_downloads.add(task.user_id)
+        return list(map(str, parts))
+
+    monkeypatch.setattr(bot, 'split_video', split)
+    task.status_message.reply_video.side_effect = RuntimeError('upload failed')
+    bot.active_downloads[task.user_id] = {'download_id': task.download_id}
+    await bot.process_download(task)
+
+    assert list(isolated_downloads.iterdir()) == []
+    assert task.user_id not in bot.active_downloads
+    assert task.user_id not in bot.cancelled_downloads
+    assert not any('✅' in call.args[0] for call in task.status_message.edit_text.call_args_list)
+    if outcome == 'upload-failed':
+        task.status_message.reply_video.assert_awaited_once()
+        assert 'Не удалось обработать видео' in task.status_message.edit_text.call_args.args[0]
+    else:
+        task.status_message.reply_video.assert_not_awaited()

@@ -63,8 +63,10 @@ async def test_upload_includes_explicit_cover_and_thumbnail(video, monkeypatch, 
     generated = []
     main_thread = threading.get_ident()
 
-    def preview(path):
+    def preview(path, cover_path=None):
         assert threading.get_ident() != main_thread
+        if parts:
+            assert cover_path == f'{video}.cover'
         generated.append(path)
         return JPEG + path.encode()
 
@@ -83,17 +85,20 @@ async def test_upload_includes_explicit_cover_and_thumbnail(video, monkeypatch, 
         received.append(kwargs['video'])
 
     status.reply_video.side_effect = send
+    task = bot.DownloadTask(user_id=1, url='url', status_message=status, user_name='user')
     paths = [str(video)]
     if parts:
+        first = video.with_name('job_video_part1.mp4')
         second = video.with_name('job_video_part2.mp4')
+        first.write_bytes(b'video')
         second.write_bytes(b'video')
-        paths.append(str(second))
-        await bot._send_video_parts(status, paths)
-        assert not video.exists() and not second.exists()
+        paths = [str(first), str(second)]
+        monkeypatch.setattr(bot, 'split_video', lambda *args: paths)
+        await bot._send_large_video(task, str(video))
+        assert not first.exists() and not second.exists()
     else:
-        task = bot.DownloadTask(1, 2, 3, 'url', status, 'user')
         await bot._send_single_video(task, str(video))
-        assert video.exists()
+    assert video.exists()
     assert generated == paths
     assert all(stream.closed for stream in received)
 
@@ -102,23 +107,28 @@ async def test_upload_includes_explicit_cover_and_thumbnail(video, monkeypatch, 
 async def test_upload_continues_without_preview(video, monkeypatch):
     monkeypatch.setattr(bot, 'create_video_preview', lambda path: None, raising=False)
     status = AsyncMock()
-    await bot._send_single_video(bot.DownloadTask(1, 2, 3, 'url', status, 'user'), str(video))
+    task = bot.DownloadTask(user_id=1, url='url', status_message=status, user_name='user')
+    await bot._send_single_video(task, str(video))
     assert set(status.reply_video.call_args.kwargs) == {'video'}
 
 
 @pytest.mark.asyncio
 async def test_cancellation_waits_for_preview_before_cleaning_parts(video, monkeypatch):
     entered, release = threading.Event(), threading.Event()
+    part = video.with_name('job_video_part1.mp4')
+    part.write_bytes(b'video')
 
-    def preview(path):
+    def preview(path, cover_path=None):
         entered.set()
         assert release.wait(3)
-        assert video.exists(), 'source must remain available to ffmpeg'
+        assert part.exists(), 'source must remain available to ffmpeg'
         return JPEG
 
     monkeypatch.setattr(bot, 'create_video_preview', preview, raising=False)
+    monkeypatch.setattr(bot, 'split_video', lambda *args: [str(part)])
     status = AsyncMock()
-    pending = asyncio.create_task(bot._send_video_parts(status, [str(video)]))
+    task = bot.DownloadTask(user_id=1, url='url', status_message=status, user_name='user')
+    pending = asyncio.create_task(bot._send_large_video(task, str(video)))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
         pending.cancel()
@@ -129,7 +139,8 @@ async def test_cancellation_waits_for_preview_before_cleaning_parts(video, monke
         with pytest.raises(asyncio.CancelledError):
             await pending
     status.reply_video.assert_not_awaited()
-    assert not video.exists()
+    assert not part.exists()
+    assert video.exists()
 
 
 @pytest.mark.parametrize('url', ['https://youtu.be/test', 'https://www.instagram.com/reel/test/'])

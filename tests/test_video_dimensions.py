@@ -96,14 +96,21 @@ async def test_upload_sends_each_videos_dimensions(video, monkeypatch, parts):
         assert 'cover' in kwargs and 'thumbnail' in kwargs
 
     status.reply_video.side_effect = send
+    task = bot.DownloadTask(user_id=1, url='url', status_message=status, user_name='user')
     if parts:
+        first = video.with_name('job_part1.mp4')
         second = video.with_name('job_part2.mp4')
+        first.write_bytes(b'part')
         second.write_bytes(b'part')
+        expected = {str(first): {'width': 1080, 'height': 1920}}
         expected[str(second)] = {'width': 1920, 'height': 1080}
-        await bot._send_video_parts(status, list(expected), cover_path=str(video) + '.cover')
+        monkeypatch.setattr(bot, 'split_video', lambda *args: list(expected))
+        await bot._send_large_video(task, str(video))
+        assert not first.exists() and not second.exists()
     else:
-        await bot._send_single_video(bot.DownloadTask(1, 2, 3, 'url', status, 'user'), str(video))
+        await bot._send_single_video(task, str(video))
     assert probed == list(expected)
+    assert video.exists()
 
 
 @pytest.mark.asyncio
@@ -111,24 +118,29 @@ async def test_upload_continues_without_dimensions(video, monkeypatch):
     monkeypatch.setattr(bot, 'get_video_dimensions', lambda *args: {}, raising=False)
     monkeypatch.setattr(bot, 'create_video_preview', lambda *args: None)
     status = AsyncMock()
-    await bot._send_single_video(bot.DownloadTask(1, 2, 3, 'url', status, 'user'), str(video))
+    task = bot.DownloadTask(user_id=1, url='url', status_message=status, user_name='user')
+    await bot._send_single_video(task, str(video))
     assert set(status.reply_video.call_args.kwargs) == {'video'}
 
 
 @pytest.mark.asyncio
 async def test_cancellation_waits_for_probe_before_cleanup(video, monkeypatch):
     entered, release = threading.Event(), threading.Event()
+    part = video.with_name('job_part1.mp4')
+    part.write_bytes(b'part')
 
     def dimensions(path):
         entered.set()
         assert release.wait(3)
-        assert video.exists(), 'source must remain available to ffprobe'
+        assert part.exists(), 'source must remain available to ffprobe'
         return {'width': 1080, 'height': 1920}
 
     monkeypatch.setattr(bot, 'get_video_dimensions', dimensions, raising=False)
     monkeypatch.setattr(bot, 'create_video_preview', lambda *args: None)
+    monkeypatch.setattr(bot, 'split_video', lambda *args: [str(part)])
     status = AsyncMock()
-    pending = asyncio.create_task(bot._send_video_parts(status, [str(video)]))
+    task = bot.DownloadTask(user_id=1, url='url', status_message=status, user_name='user')
+    pending = asyncio.create_task(bot._send_large_video(task, str(video)))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
         pending.cancel()
@@ -139,4 +151,5 @@ async def test_cancellation_waits_for_probe_before_cleanup(video, monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await pending
     status.reply_video.assert_not_awaited()
-    assert not video.exists()
+    assert not part.exists()
+    assert video.exists()
