@@ -38,7 +38,7 @@ Python, uv, Deno и FFmpeg на хосте для этого способа не
    Контейнер работает от `appuser` с UID 1000: каталог `downloads/` должен быть
    доступен ему для записи, а файлы cookies — для чтения. Если каталог создан
    другим пользователем, настройте его владельца или права перед запуском.
-   Для приватного пакета сначала выполните [вход в GHCR](#образы-и-ci).
+   Для приватного пакета выполните `docker login ghcr.io` по [инструкции GitHub](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry).
 
 Остановка:
 
@@ -195,65 +195,6 @@ Production содержит FFmpeg и работает от UID 1000. Test со�
 `make shell`, `make install`, `make dev`, `make test`. `make clean` удаляет локальные
 видеофайлы из `downloads/` и кеши Python/pytest; запускайте его после остановки бота.
 
-## Тестирование
-
-Тесты используют подмены внешних сервисов и временные каталоги, не обращаются
-к живым Telegram/YouTube/Instagram и не удаляют рабочие загрузки. Токен не нужен.
-После `uv sync --locked --extra dev`:
-
-```bash
-uv run --locked pytest tests/ -v
-# Или: make test
-
-# Отдельная проверка:
-uv run --locked pytest tests/ -v -k test_name
-
-# Текущий локальный код в Docker:
-make test-docker
-
-# Опубликованный test-образ из GHCR:
-docker compose --profile test run --rm test
-```
-
-Тестовый контейнер запускается без сети и не получает `.env` с токеном.
-`test_video_*_ffmpeg.py` проверяют нарезку, порядок кадров, обложки и размеры
-с реальными `ffmpeg`/`ffprobe`; без этих программ проверки пропускаются.
-В production-образе их можно выполнить без установки pytest:
-
-```bash
-make build
-docker run --rm --network none -v "$PWD/tests:/app/tests:ro" tgdlbot:production \
-  python -m unittest discover -s tests -p 'test_video_*_ffmpeg.py' -v
-```
-
-## Образы и CI
-
-Workflow [Container images](https://github.com/amerbaev/tgdlbot/actions/workflows/images.yml)
-запускается для PR в `master`, push в `master` и вручную через GitHub Actions.
-Этапы — `build → test → publish`: по четыре сборки и проверки
-(`production`/`test` × `amd64`/`arm64`) на нативных runners.
-
-В тестах проверяются архитектура образа и запуск Python. Test-образ проходит
-офлайн-набор pytest, production — проверки с реальным FFmpeg. Между jobs образы
-передаются через artifacts, поэтому публикуются именно проверенные образы без
-повторной сборки. Artifacts хранятся три дня; после их удаления нужен новый build.
-Публикация выполняется после успешных проверок только для `master`, включая
-ручной запуск этой ветки. PR образы не публикует.
-
-| Образ в `ghcr.io/amerbaev/tgdlbot` | Обновляемые теги | Тег конкретного коммита |
-| --- | --- | --- |
-| Production | `latest`, `master` | `sha-<полный SHA>` |
-| Test | `test` | `test-sha-<полный SHA>` |
-
-Эти теги содержат `linux/amd64` и `linux/arm64`; Docker выбирает вариант хоста.
-Для приватного пакета выполните `docker login ghcr.io` с personal access token
-(classic), имеющим `read:packages`, по [инструкции GitHub](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
-Для публичного пакета авторизация не нужна.
-
-CI использует встроенный `GITHUB_TOKEN`; право `packages: write` есть только
-у job `publish`. Если пакет уже существует, репозиторию нужен доступ к нему
-в настройках пакета **Manage Actions access**.
-
 ## Диагностика
 
 ### Instagram: `empty media response`
@@ -313,35 +254,6 @@ traceback, а неверный токен останавливает запус�
   docker compose pull tgdlbot
   docker compose up -d --force-recreate tgdlbot
   ```
-
-## Структура и разработка
-
-| Путь | Назначение |
-| --- | --- |
-| [`bot.py`](bot.py) | Telegram-команды, допуск заданий, скачивание, отправка и отмена |
-| [`config.py`](config.py) | Переменные окружения и лимиты |
-| [`media.py`](media.py) | Нарезка, обложки, размеры кадра и очистка файлов |
-| [`platforms/`](platforms/) | Проверка URL и выбор форматов YouTube/Instagram |
-| [`tests/`](tests/) | Офлайн-тесты и проверки с FFmpeg |
-| [`Dockerfile`](Dockerfile) | Отдельные production- и test-образы |
-| [`docker-compose.yml`](docker-compose.yml) | Запуск готовых образов из GHCR |
-| [`docker-compose.build.yml`](docker-compose.build.yml) | Дополнение для локальной сборки |
-| [`Makefile`](Makefile) | Команды запуска, сборки, тестирования и очистки |
-| [`pyproject.toml`](pyproject.toml), [`uv.lock`](uv.lock) | Зависимости и закреплённые версии |
-| [`.github/workflows/images.yml`](.github/workflows/images.yml) | Сборка, проверка и публикация образов |
-
-Telegram-обработчики асинхронные; блокирующие yt-dlp и FFmpeg выполняются через
-`asyncio.to_thread()`. У задания есть UUID для имён файлов и очистки; при остановке
-приложение ждёт фоновые задачи перед завершением работы.
-
-Для новой платформы наследуйте [`BasePlatform`](platforms/base.py), реализуйте
-`name`, `url_pattern` и `get_format_options(info)`, экспортируйте класс из
-`platforms/__init__.py` и добавьте экземпляр в `PLATFORMS` в `bot.py`.
-Проверки URL и выбор форматов покройте офлайн-тестами в `tests/platforms/`.
-
-Зависимости добавляются через `uv add package_name`; фиксируйте изменения
-`pyproject.toml` и `uv.lock` вместе. При обновлении yt-dlp согласуйте закреплённую
-версию `yt-dlp-ejs` с его требованиями и запустите тесты.
 
 ## Лицензия
 
